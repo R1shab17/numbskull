@@ -84,8 +84,9 @@ export class UI {
         <div class="logo"><h1>NUMB<br>SKULL</h1><span class="num">4821</span></div>
         <p class="tagline">Read their forehead. Type the number. They're out.</p>
         <div class="home-actions">
-          <button class="btn big go" id="hPlay">Play vs bots</button>
-          <div class="row"><button class="btn alt" id="hHost">Host a room</button><button class="btn alt" id="hJoin">Join a room</button></div>
+          <button class="btn big go" id="hQuick">Play online <span class="kbd" style="color:inherit">Battle Royale</span></button>
+          <button class="btn big alt" id="hPlay">Play vs bots</button>
+          <div class="row"><button class="btn alt" id="hHost">Host a private room</button><button class="btn alt" id="hJoin">Join with a code</button></div>
           <div class="row"><button class="btn ghost" id="hHow" style="color:#fff">How to play</button><button class="btn ghost" id="hSet" style="color:#fff">Settings</button></div>
         </div>
       </div>
@@ -125,6 +126,7 @@ export class UI {
     $('#hatPrev').addEventListener('click', () => hat(-1));
     $('#hatNext').addEventListener('click', () => hat(1));
     $('#hPlay').addEventListener('click', () => this.go('setup', { kind: 'solo' }));
+    $('#hQuick').addEventListener('click', () => this.app.quickPlay());
     $('#hHost').addEventListener('click', () => this.go('setup', { kind: 'host' }));
     $('#hJoin').addEventListener('click', () => this.go('join'));
     $('#hHow').addEventListener('click', () => this.go('howto', { back: 'home' }));
@@ -134,6 +136,7 @@ export class UI {
   // ---------------------------------------------------------------- match setup (solo + host)
   s_setup({ kind }) {
     const M = this.app.match;
+    if (M.lives == null) M.lives = 2;
     const isHost = kind !== 'solo';
     const modeCards = Object.values(MODES).map(m => `<button class="card" data-mode="${m.id}" aria-pressed="${m.id === M.mode}"><b>${m.name}</b><span>${m.blurb}</span></button>`).join('');
     const mapCards = MAP_LIST.map(m => `<button class="card" data-map="${m.id}" aria-pressed="${m.id === M.mapId}"><div class="swatchmap" style="background:${MAP_COLORS[m.id]}"></div><b>${m.name}</b><span>${m.blurb}</span></button>`).join('');
@@ -141,14 +144,16 @@ export class UI {
     return `<section class="screen setup">
       ${this.head(kind === 'hostEdit' ? 'Room settings' : isHost ? 'Host a room' : 'Play vs bots', kind === 'hostEdit' ? 'lobby' : 'home')}
       <div class="note" style="--tilt:-.6deg">
-        <div class="field"><span class="lbl">Mode</span><div class="cards">${modeCards}</div></div>
+        <div class="field"><span class="lbl">Mode</span><div class="cards two">${modeCards}</div></div>
         <div class="field" style="margin-top:8px"><span class="lbl">Map</span><div class="cards">${mapCards}</div></div>
       </div>
       <div class="note mint" style="--tilt:.8deg">
         <div class="rowfields">
           <div class="field"><span class="lbl">Bots</span><div class="stepper"><button data-step="bots" data-d="-1" aria-label="Fewer bots">−</button><output id="o_bots">${M.bots}</output><button data-step="bots" data-d="1" aria-label="More bots">+</button></div></div>
-          <div class="field"><span class="lbl" id="slLbl">${M.mode === 'ctf' ? 'Captures to win' : 'Reads to win'}</span><div class="stepper"><button data-step="scoreLimit" data-d="-1" aria-label="Lower">−</button><output id="o_scoreLimit">${M.scoreLimit}</output><button data-step="scoreLimit" data-d="1" aria-label="Higher">+</button></div></div>
+          <div class="field" id="slField" ${M.mode === 'br' ? 'hidden' : ''}><span class="lbl" id="slLbl">${M.mode === 'ctf' ? 'Captures to win' : 'Reads to win'}</span><div class="stepper"><button data-step="scoreLimit" data-d="-1" aria-label="Lower">−</button><output id="o_scoreLimit">${M.scoreLimit}</output><button data-step="scoreLimit" data-d="1" aria-label="Higher">+</button></div></div>
+          <div id="livesField" ${M.mode === 'br' ? '' : 'hidden'}>${seg('lives', [[1, '1'], [2, '2'], [3, '3']], 'Notes each')}</div>
         </div>
+        <p id="brNote" style="font-size:.88rem;margin:-4px 0 10px" ${M.mode === 'br' ? '' : 'hidden'}>One read rips a note off and shows a new number underneath. Lose your last note and you're out. Pick 1 for instant knockouts.</p>
         ${seg('difficulty', Object.entries(DIFFICULTY).map(([k, d]) => [k, d.name]), 'Bot skill')}
         ${seg('digits', [[3, '3 digits'], [4, '4 digits'], [5, '5 digits']], 'Forehead numbers')}
         ${seg('timeLimit', [[180, '3 min'], [300, '5 min'], [480, '8 min'], [720, '12 min']], 'Time limit')}
@@ -163,6 +168,7 @@ export class UI {
     const M = this.app.match;
     this.bindBack();
     const limits = { bots: [0, MAX_PLAYERS - 1], scoreLimit: [1, 100] };
+    if (M.lives == null) M.lives = 2;
     const note = () => {
       const n = $('#sNote');
       if (kind !== 'solo') n.textContent = `Up to ${MAX_PLAYERS} players in a room, bots included.`;
@@ -171,9 +177,13 @@ export class UI {
     $$('[data-mode]', this.root).forEach(b => b.addEventListener('click', () => {
       M.mode = b.dataset.mode;
       M.scoreLimit = MODES[M.mode].scoreLimit;
+      if (M.mode === 'br') { M.timeLimit = Math.max(M.timeLimit, 300); if (M.bots < 1) M.bots = 1; $('#o_bots').textContent = M.bots; }
       $$('[data-mode]', this.root).forEach(x => x.setAttribute('aria-pressed', x === b));
       $('#o_scoreLimit').textContent = M.scoreLimit;
       $('#slLbl').textContent = M.mode === 'ctf' ? 'Captures to win' : M.mode === 'tdm' ? 'Team reads to win' : 'Reads to win';
+      $('#slField').hidden = M.mode === 'br';
+      $('#livesField').hidden = M.mode !== 'br';
+      $('#brNote').hidden = M.mode !== 'br';
       this.app.saveMatch();
     }));
     $$('[data-map]', this.root).forEach(b => b.addEventListener('click', () => {
@@ -193,7 +203,7 @@ export class UI {
     $$('[data-step]', this.root).forEach(b => b.addEventListener('click', () => {
       const k = b.dataset.step, d = +b.dataset.d;
       const step = k === 'scoreLimit' && M.scoreLimit >= 10 ? 5 : 1;
-      M[k] = Math.max(limits[k][0], Math.min(limits[k][1], M[k] + d * step));
+      M[k] = Math.max(k === 'bots' && M.mode === 'br' && kind === 'solo' ? 1 : limits[k][0], Math.min(limits[k][1], M[k] + d * step));
       $('#o_' + k).textContent = M[k];
       note(); this.app.saveMatch();
     }));
@@ -244,7 +254,8 @@ export class UI {
         <div class="roomcode" id="lCode">${esc(d.code || '····')}</div>
         <div class="startrow"><button class="btn alt" id="lCopy">Copy code</button></div>
         <p style="margin-top:12px">Friends pick <b>Join a room</b> and type this code. They can also join while a match is running.</p>
-        <p style="font-size:.9rem"><b>${MODES[M.mode].name}</b> on <b>${esc(MAP_LIST.find(m => m.id === M.mapId)?.name || '')}</b> · ${M.digits}-digit numbers · ${DIFFICULTY[M.difficulty]?.name || ''} bots${teams ? ' · teams are balanced at the start' : ''}</p>
+        <p style="font-size:.9rem"><b>${MODES[M.mode].name}</b> on <b>${esc(d.publicRoom ? 'a random map' : MAP_LIST.find(m => m.id === M.mapId)?.name || '')}</b> · ${M.digits}-digit numbers · ${DIFFICULTY[M.difficulty]?.name || ''} bots${M.mode === 'br' ? ` · ${M.lives || 2} notes each` : ''}${teams ? ' · teams are balanced at the start' : ''}</p>
+        ${d.countdown != null ? `<p style="font-weight:700">Next round starts in <span id="lCount">${d.countdown}</span>s</p>` : ''}
       </div>
       <div class="note mint" style="--tilt:.8deg">
         <h2>Players <small style="font-family:var(--f-body);font-size:.9rem">${players.length}/${MAX_PLAYERS}</small></h2>
@@ -321,6 +332,13 @@ export class UI {
         <p><b>Camera.</b> Freezes your view in a photo for a few seconds so you can read numbers at your own pace. They still need to be in sight when you finish typing.</p>
         <p>Grab mint-green crates around the map to refill gadgets.</p>
       </div>
+      <div class="note blue" style="--tilt:.6deg">
+        <h2>Battle Royale</h2>
+        <p>No respawns. Everyone starts with a stack of sticky notes. Read someone and their top note rips off, showing a new number underneath. Lose your last note and you're out.</p>
+        <p>The pink zone keeps shrinking. Stay outside it for more than a few seconds and you're out too. The dotted circle on the map shows where it closes to next.</p>
+        <p>Once you're out you can spectate. Follow any player with <kbd>←</kbd> <kbd>→</kbd>, or press <kbd>V</kbd> for the god view from above (drag or WASD to pan, wheel to zoom, click a player to follow them).</p>
+        <p><b>Play online</b> drops you into a public Battle Royale room with whoever else is playing. Rounds start back to back and bots fill the empty spots.</p>
+      </div>
       <div class="note mint" style="--tilt:1deg">
         <h2>Modes</h2>
         ${Object.values(MODES).map(m => `<p><b>${m.name}.</b> ${m.blurb}</p>`).join('')}
@@ -372,12 +390,13 @@ export class UI {
       <div class="note" style="--tilt:-1.2deg;text-align:center">
         <h2>Paused</h2>
         ${d.code ? `<p>Room code <b style="font-family:var(--f-display);font-size:1.4rem;letter-spacing:.1em">${esc(d.code)}</b></p>` : ''}
+        ${d.publicRoom ? `<p>Public room ${d.slot}${d.host ? '. You are hosting it, so it closes if you leave and everyone is moved to another room.' : ''}</p>` : ''}
         ${d.online ? '<p style="font-size:.9rem">The match keeps going while you are in this menu.</p>' : ''}
         <div style="display:grid;gap:10px;margin-top:8px">
           <button class="btn big go" id="pResume">Resume</button>
           <button class="btn alt" id="pSettings">Settings</button>
           <button class="btn alt" id="pHow">How to play</button>
-          <button class="btn ghost" id="pLeave">${d.host ? 'End match and close room' : 'Leave match'}</button>
+          <button class="btn ghost" id="pLeave">${d.host && !d.publicRoom ? 'End match and close room' : 'Leave match'}</button>
         </div>
       </div>
     </section>`;
@@ -398,19 +417,24 @@ export class UI {
       const mine = R.players.find(p => p.id === me);
       sub = mine && R.winner ? (mine.team === R.winner ? 'Nice reading.' : 'They had your number.') : `${R.teamScore[1]} – ${R.teamScore[2]}`;
       sub += ` · Red ${R.teamScore[1]}, Blue ${R.teamScore[2]}`;
+    } else if (R.br) {
+      const w = R.players.find(p => p.id === R.winner);
+      const mine = R.players.find(p => p.id === me);
+      title = w ? (w.id === me ? 'Last head standing' : `${esc(w.name)} wins`) : 'Nobody survived';
+      sub = mine && mine.place ? (mine.place === 1 ? 'Nobody could read you.' : `You came #${mine.place} of ${R.players.filter(p => p.place).length}.`) : 'You watched this one.';
     } else {
       const w = R.players.find(p => p.id === R.winner);
       title = w ? (w.id === me ? 'You win' : `${esc(w.name)} wins`) : 'Draw';
       sub = w && w.id === me ? 'Human calculator.' : 'Better luck next time.';
     }
-    const sorted = [...R.players].sort((a, b) => (b.kills - a.kills) || (a.deaths - b.deaths));
-    const row = (p) => `<tr class="${p.id === me ? 'me' : ''}"><td>${R.teams ? `<span class="tag ${p.team === 1 ? 'red' : 'blue'}">${TEAM_NAME[p.team]}</span> ` : ''}${esc(p.name)}${p.isBot ? ' <small style="opacity:.6">bot</small>' : ''}</td><td class="n">${p.kills}</td><td class="n">${p.deaths}</td>${d.ctf ? `<td class="n">${p.caps}</td>` : ''}<td class="n">${p.misses}</td><td class="n">${p.best}</td><td class="n">${p.fastest ? (p.fastest / 1000).toFixed(2) + 's' : '–'}</td></tr>`;
+    const sorted = R.br ? [...R.players].sort((a, b) => (a.place || 99) - (b.place || 99) || b.kills - a.kills) : [...R.players].sort((a, b) => (b.kills - a.kills) || (a.deaths - b.deaths));
+    const row = (p) => `<tr class="${p.id === me ? 'me' : ''}">${R.br ? `<td class="n">${p.place ? '#' + p.place : '–'}</td>` : ''}<td>${R.teams ? `<span class="tag ${p.team === 1 ? 'red' : 'blue'}">${TEAM_NAME[p.team]}</span> ` : ''}${esc(p.name)}${p.isBot ? ' <small style="opacity:.6">bot</small>' : ''}</td><td class="n">${p.kills}</td><td class="n">${p.deaths}</td>${d.ctf ? `<td class="n">${p.caps}</td>` : ''}<td class="n">${p.misses}</td><td class="n">${p.best}</td><td class="n">${p.fastest ? (p.fastest / 1000).toFixed(2) + 's' : '–'}</td></tr>`;
     return `<section class="screen" style="max-width:860px">
       <div class="end-banner"><h2>${title}</h2><p>${esc(sub)}</p></div>
       <div class="note white" style="--tilt:-.4deg">
-        <div class="tablewrap"><table class="res"><tr><th>Player</th><th class="n">Reads</th><th class="n">Deaths</th>${d.ctf ? '<th class="n">Caps</th>' : ''}<th class="n">Misses</th><th class="n">Best streak</th><th class="n">Fastest read</th></tr>${sorted.map(row).join('')}</table></div>
+        <div class="tablewrap"><table class="res"><tr>${R.br ? '<th class="n">Place</th>' : ''}<th>Player</th><th class="n">${R.br ? 'Out' : 'Reads'}</th><th class="n">Deaths</th>${d.ctf ? '<th class="n">Caps</th>' : ''}<th class="n">Misses</th><th class="n">Best streak</th><th class="n">Fastest read</th></tr>${sorted.map(row).join('')}</table></div>
         <div class="startrow" style="margin-top:14px">
-          ${d.canRestart ? '<button class="btn big go" id="eAgain">Play again</button>' : '<span style="font-weight:700">Waiting for the host…</span>'}
+          ${d.canRestart ? '<button class="btn big go" id="eAgain">Play again</button>' : d.publicRoom ? '<span style="font-weight:700">Next round starts in a few seconds…</span>' : '<span style="font-weight:700">Waiting for the host…</span>'}
           ${d.host ? '<button class="btn alt" id="eLobby">Back to room</button>' : ''}
           <button class="btn ghost" id="eMenu">${d.online ? 'Leave' : 'Main menu'}</button>
         </div>
@@ -427,9 +451,12 @@ export class UI {
   s_message(d) {
     return `<section class="screen" style="max-width:520px;min-height:100%;align-content:center">
       <div class="note pink" style="--tilt:-1deg"><h2>${esc(d.title)}</h2><p>${esc(d.text)}</p>
-      <div class="startrow">${d.busy ? '' : '<button class="btn" id="mOk">OK</button>'}</div></div></section>`;
+      <div class="startrow">${d.busy ? '<button class="btn ghost" id="mCancel">Cancel</button>' : '<button class="btn" id="mOk">OK</button>'}</div></div></section>`;
   }
-  b_message(d) { $('#mOk')?.addEventListener('click', () => (d.onOk ? d.onOk() : this.go('home'))); }
+  b_message(d) {
+    $('#mOk')?.addEventListener('click', () => (d.onOk ? d.onOk() : this.go('home')));
+    $('#mCancel')?.addEventListener('click', () => { const s = this.app.session; this.app.session = null; s?.close(); this.go('home'); });
+  }
 
   frame(dt) { if (this.cur === 'home' && !this.menu.hidden) this.preview.frame(dt); }
 }

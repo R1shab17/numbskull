@@ -11,7 +11,7 @@ export class BotBrain {
   constructor(game, p, diff) {
     this.g = game; this.p = p; this.d = diff;
     this.jit = rand(0.85, 1.2);          // per-bot personality
-    this.aggression = rand(0.3, 1);
+    this.aggression = rand(0.3, 1) * (game.br ? 0.45 : 1);
     this.role = null;                    // CTF: 'attack' or 'defend', picked on first use
     this.know = new Map();               // enemy id -> { prog, num, seenT, x, y, z }
     this.reset();
@@ -80,7 +80,7 @@ export class BotBrain {
         if (k.num && now - k.seenT > 14) k.num = null; // forgot it
         // footsteps: people running nearby give themselves away
         const hd = Math.hypot(e.x - p.x, e.z - p.z);
-        if (hd < 22 && e.speed > 3.2 && !e.crouch) { k.heardT = now; k.x = e.x + rand(-2, 2); k.y = e.y; k.z = e.z + rand(-2, 2); }
+        if (hd < (g.br ? 14 : 22) && e.speed > 3.2 && !e.crouch && Math.random() < (g.br ? 0.35 : 1)) { k.heardT = now; k.x = e.x + rand(-2, 2); k.y = e.y; k.z = e.z + rand(-2, 2); }
       }
       this.know.set(e.id, k);
     }
@@ -134,6 +134,19 @@ export class BotBrain {
     }
     if (this.typing) return;
 
+    // 1b) Battle Royale: get inside the zone before anything else
+    if (g.br && g.zone && g.phase === 'play') {
+      const Z = g.zone;
+      const useNext = Z.state === 'shrink' || (Z.state === 'wait' && Z.t < 14) || Z.state === 'final';
+      const safe = g.inZone(p.x, p.z, 1.5, useNext) && g.inZone(p.x, p.z, 1, false);
+      if (!safe) {
+        if (this.state !== 'zone' || !this.goal || !g.inZone(this.goal[0], this.goal[1], 1.5, useNext)) { this.goal = this.zonePoint(useNext); this.path = null; }
+        this.state = 'zone'; this.stateT = 2; this.sprint = true; this.zoom = false; this.crouch = false;
+        return;
+      }
+      if (this.state === 'zone') { this.state = 'roam'; this.goal = null; }
+    }
+
     // 2) being read? either win the race or get out of there
     const th = this.threats();
     if (th.length && this.state !== 'evade' && now > (this.evadeCd || 0)) {
@@ -141,7 +154,7 @@ export class BotBrain {
       const k = this.know.get(t.e.id);
       const racing = k && (k.num || k.prog > 0.4);
       this.evadeCd = now + rand(1, 1.8);
-      if (!racing && Math.random() < d.evade * 0.55) {
+      if (!racing && Math.random() < d.evade * (g.br ? 0.9 : 0.55)) {
         this.evadeFrom = t.e;
         if (this.tryGadget('flash', t.e, t.dist)) return;
         if (Math.random() < 0.5) this.tryGadget('smoke', t.e, Math.min(6, t.dist * 0.4));
@@ -174,8 +187,8 @@ export class BotBrain {
       }
       this.zoom = false;
       this.state = 'study'; this.stateT = rand(0.8, 1.6);
-      // close in to reading range, but not too close
-      if (v.dist > range * 0.7) { this.goal = [v.e.x, v.e.z]; this.path = null; }
+      // close in to reading range, but not too close (in Battle Royale, often hold position instead)
+      if (v.dist > range * 0.7 && !(g.br && Math.random() < 0.55)) { this.goal = [v.e.x, v.e.z]; this.path = null; }
       else { this.goal = null; this.path = null; }
       this.strafe = Math.random() < 0.5 ? -1 : 1;
       if (Math.random() < d.gadget * 0.15) this.tryGadget('flash', v.e, v.dist);
@@ -206,9 +219,20 @@ export class BotBrain {
       this.goal = this.pickGoal();
       this.stateT = busy ? rand(1.5, 3) : rand(6, 14);
       this.path = null;
-      this.sprint = busy || Math.random() < 0.5;
+      this.sprint = busy || (!g.br && Math.random() < 0.5);
+      if (g.br) this.crouch = Math.random() < 0.25;
       if (Math.random() < d.gadget * 0.08) this.tryGadget('distract', null, rand(10, 20));
     }
+  }
+
+  zonePoint(next) {
+    const g = this.g, Z = g.zone;
+    const cx = next ? Z.nx : Z.x, cz = next ? Z.nz : Z.z, r = next ? Z.nr : Z.r;
+    for (let k = 0; k < 40; k++) {
+      const [x, z] = g.world.randomNavPoint();
+      if (Math.hypot(x - cx, z - cz) < r * 0.7) return [x, z];
+    }
+    return [cx, cz];
   }
 
   maybeTypo(num) {
@@ -239,6 +263,11 @@ export class BotBrain {
         if (Math.hypot(x - own.home.x, z - own.home.z) < 16) return [x, z];
       }
       return [own.home.x + rand(-6, 6), own.home.z + rand(-6, 6)];
+    }
+    if (g.br && g.zone) {
+      const Z = g.zone;
+      const useNext = Z.state !== 'wait' || Z.t < 20;
+      if (Math.random() < 0.7) return this.zonePoint(useNext);
     }
     // head toward pickups when low on gadgets
     const low = p.inv.flash + p.inv.smoke + p.inv.distract <= 1;

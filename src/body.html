@@ -16,6 +16,8 @@
     <div id="score-r" class="scorechip"></div>
   </div>
   <div id="ctf-hud" hidden></div>
+  <div id="zonebar" hidden></div>
+  <div id="zonewarn" hidden><b>Outside the zone</b><span>Get back in or you're out in <i id="zonesecs">4</i></span></div>
   <div id="feed" aria-live="polite"></div>
   <canvas id="minimap" width="200" height="160"></canvas>
 
@@ -47,6 +49,17 @@
       <div id="deathcode" class="marker"></div>
       <div id="respawn">Back in <b>3</b></div>
     </div>
+  </div>
+
+  <div id="specbar">
+    <div class="spec-who"><span class="lbl" id="specLbl">Spectating</span><b id="specName">—</b><span id="specInfo"></span></div>
+    <div class="spec-btns">
+      <button id="specPrev" aria-label="Previous player">‹</button>
+      <button id="specView">God view</button>
+      <button id="specNext" aria-label="Next player">›</button>
+      <button id="specFast" hidden>Fast-forward</button>
+    </div>
+    <div class="spec-hint" id="specHint">← → switch player · V god view · drag to look around</div>
   </div>
 
   <div id="chat">

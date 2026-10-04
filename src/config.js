@@ -1,8 +1,16 @@
 // Global tuning. Everything gameplay-related lives here so it is easy to tweak.
 
 export const VERSION = '1.0.0';
-export const NET_VERSION = 1;
+export const NET_VERSION = 2;
 export const MAX_PLAYERS = 20;
+
+// Quick play: public Battle Royale rooms that run back-to-back rounds.
+export const PUBLIC = {
+  slots: 12,              // public rooms anyone can land in
+  fill: 12,               // bots top each round up to this many players
+  intermission: 9,        // seconds on the results screen between rounds
+  match: { mode: 'br', digits: 4, difficulty: 'normal', lives: 2, timeLimit: 300, scoreLimit: 1 },
+};
 
 export const CFG = {
   // reading & killing
@@ -56,6 +64,21 @@ export const MODES = {
          blurb: 'Red vs Blue. Read the other team, protect your own foreheads.' },
   ctf: { id: 'ctf', name: 'Capture the Flag', short: 'CTF', teams: true,  scoreLimit: 3,  timeLimit: 600,
          blurb: 'Grab their flag, bring it home. Your own flag has to be at base to score.' },
+  br:  { id: 'br',  name: 'Battle Royale',    short: 'BR',  teams: false, scoreLimit: 1,  timeLimit: 300,
+         blurb: 'Every head for themselves while the zone closes in. Last one standing wins.' },
+};
+
+// Battle Royale zone: each stage waits, then shrinks to a fraction of the starting radius.
+export const ZONE = {
+  grace: 4,          // seconds you can survive outside the zone
+  dropProtect: 8,    // nobody can be read for the first seconds of a round, so everyone can scatter
+  stages: [
+    { wait: 12, shrink: 18, to: 0.55 },
+    { wait: 10, shrink: 16, to: 0.32 },
+    { wait: 10, shrink: 15, to: 0.16 },
+    { wait: 8, shrink: 14, to: 0.06 },
+    { wait: 6, shrink: 16, to: 0 },
+  ],
 };
 
 export const DIFFICULTY = {

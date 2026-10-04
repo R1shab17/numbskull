@@ -1,5 +1,5 @@
 // Numbskull: app entry. Wires menus, input, the match simulation, rendering and sound.
-import { CFG, GADGETS, GADGET_LABEL, STREAKS, TEAM_NAME, TEAM_COLOR, SHIRT_COLORS, SKIN_TONES, HATS, MODES } from './config.js';
+import { CFG, GADGETS, GADGET_LABEL, STREAKS, TEAM_NAME, TEAM_COLOR, SHIRT_COLORS, SKIN_TONES, HATS, MODES, PUBLIC } from './config.js';
 import { Renderer } from './render.js';
 import { Input } from './input.js';
 import { Hud, esc } from './hud.js';
@@ -17,7 +17,7 @@ const store = {
 };
 const MISS_TEXT = {
   nobody: "Nobody has that number", sight: "They're not in sight", self: "That's your own number", team: "That's a teammate",
-  protected: "They just spawned, give it a sec", decoy: "That was a decoy", wait: 'Not yet!',
+  protected: "They're shielded for a moment", decoy: "That was a decoy", wait: 'Not yet!',
 };
 
 class SoloSession {
@@ -35,7 +35,7 @@ class App {
     this.profile = store.get('profile', { name: 'Reader ' + (100 + Math.floor(Math.random() * 900)), shirt: pick(SHIRT_COLORS), skin: pick(SKIN_TONES), hat: pick(HATS) });
     const coarse = matchMedia('(pointer: coarse)').matches;
     this.settings = store.get('settings', { sens: 1, fov: CFG.fov, volume: 0.7, quality: coarse ? 1 : 2, scale: coarse ? 0.85 : 1, invertY: false, watchWarn: true, announcer: true, showFps: false, touch: 'auto' });
-    this.match = store.get('match', { mode: 'dm', mapId: 'plaza', bots: 7, difficulty: 'normal', digits: 4, scoreLimit: 20, timeLimit: 300 });
+    this.match = store.get('match', { mode: 'dm', mapId: 'plaza', bots: 7, difficulty: 'normal', digits: 4, scoreLimit: 20, timeLimit: 300, lives: 2 });
     if (!MODES[this.match.mode]) this.match.mode = 'dm';
     if (!MAP_LIST.some(m => m.id === this.match.mapId)) this.match.mapId = 'plaza';
     this.previewNum = String(1000 + Math.floor(Math.random() * 9000));
@@ -69,7 +69,22 @@ class App {
     document.getElementById('chatform').addEventListener('submit', (e) => { e.preventDefault(); this.sendChat(); });
     document.getElementById('chatin').addEventListener('keydown', (e) => { if (e.key === 'Escape') this.closeChat(); e.stopPropagation(); });
     this.input.bindTouch(document.getElementById('touch'));
+    document.getElementById('specPrev').addEventListener('click', () => this.specCycle(-1));
+    document.getElementById('specNext').addEventListener('click', () => this.specCycle(1));
+    document.getElementById('specView').addEventListener('click', () => this.specToggle());
+    document.getElementById('specFast').addEventListener('click', () => { this.fast = !this.fast; });
     addEventListener('pagehide', () => { try { this.session?.close(); } catch { /* closing anyway */ } });
+    // Browsers pause hidden tabs. A host keeps the match running for everyone from a worker timer.
+    try {
+      const url = URL.createObjectURL(new Blob(['setInterval(function(){postMessage(0)},50)'], { type: 'text/javascript' }));
+      this.bgWorker = new Worker(url);
+      this.bgWorker.onmessage = () => {
+        if (!document.hidden || this.session?.type !== 'host') return;
+        const g = this.game;
+        if (g) { g.update(0.05); this.session.tick(0.05); }
+        else this.session.tick(0.05);
+      };
+    } catch { /* workers unavailable: hosting still works while the tab is visible */ }
     this.last = performance.now();
     requestAnimationFrame((t) => this.frame(t));
   }
@@ -87,7 +102,7 @@ class App {
     this.touchMode = S.touch === 'on' || (S.touch === 'auto' && this.input.isTouch);
     document.body.classList.toggle('touch', this.touchMode && this.state !== 'menu');
     document.body.classList.toggle('playing', this.state === 'play');
-    document.getElementById('touch').hidden = !(this.touchMode && this.game && this.state === 'play');
+    document.getElementById('touch').hidden = !(this.touchMode && this.game && this.state === 'play' && !this.spec);
     document.getElementById('fps').hidden = !S.showFps;
   }
 
@@ -108,10 +123,10 @@ class App {
 
   startSolo() {
     const M = this.match;
-    const g = new Game({ mapId: M.mapId, mode: M.mode, digits: M.digits, scoreLimit: M.scoreLimit, timeLimit: M.timeLimit, difficulty: M.difficulty, authority: true });
+    const g = new Game({ mapId: M.mapId, mode: M.mode, digits: M.digits, scoreLimit: M.scoreLimit, timeLimit: M.timeLimit, difficulty: M.difficulty, lives: M.lives, authority: true });
     const me = g.addPlayer({ ...this.profile, name: (this.profile.name || 'You').slice(0, 16) });
     g.localId = me.id;
-    g.addBots(M.bots);
+    g.addBots(M.mode === 'br' ? Math.max(1, M.bots) : M.bots);
     g.balanceTeams();
     this.session = new SoloSession(this);
     this.beginMatch(g);
@@ -127,6 +142,41 @@ class App {
     this.session?.close();
     this.session = new ClientSession(this);
     this.session.join(code);
+  }
+
+  // Quick play: join the first public room with space, or open one if the slot is empty.
+  quickPlay(slot = 1, tries = 0, note) {
+    if (this.session) { const old = this.session; this.session = null; old.close(); }
+    if (this.game) this.endMatchView();
+    if (slot > PUBLIC.slots) {
+      this.ui.go('message', { title: 'Every public room is full', text: 'Try again in a minute, or host a private room and share the code.' });
+      return;
+    }
+    this.ui.go('message', { title: 'Finding a match…', text: note || 'Looking for a public Battle Royale room with space for you.', busy: true });
+    const cs = new ClientSession(this, {
+      public: true, slot,
+      onFail: (kind, msg) => {
+        if (this.session !== cs) return;
+        if (window.NUMBSKULL_DEBUG) console.log('[quickplay] slot', slot, 'failed:', kind, msg || '');
+        if (kind === 'unavailable') return this.hostPublic(slot, tries);
+        if (kind === 'full' || kind === 'timeout') return this.quickPlay(slot + 1, 0);
+        if (kind === 'lost') return this.quickPlay(1, 0, 'The host left, so that room closed. Finding you another one…');
+        this.session = null;
+        this.ui.go('message', { title: "Couldn't go online", text: msg || 'Something went wrong while connecting.' });
+      },
+    });
+    this.session = cs;
+    cs.join(null);
+  }
+
+  hostPublic(slot, tries) {
+    const hs = new HostSession(this, {
+      public: true, slot,
+      // someone else claimed this slot at the same moment: join them instead
+      onTaken: () => { if (this.session === hs) { this.session = null; tries < 3 ? this.quickPlay(slot, tries + 1) : this.quickPlay(slot + 1, 0); } },
+    });
+    this.session = hs;
+    hs.open();
   }
 
   beginMatch(game) {
@@ -147,14 +197,17 @@ class App {
     this.view.mode = 'wait';
     this.lastCount = 0;
     this.endShown = false;
+    this.spec = null; this.fast = false; this.input.noLock = false;
     this.input.enabled = true;
     this.input.zoomToggle = false;
     this.applySettings();
     if (!this.touchMode) this.input.lock(false);
     if (game.teams && me) setTimeout(() => this.hud.center(`You're on ${TEAM_NAME[me.team]}`, '', 2.5), 300);
+    if (game.br && me) setTimeout(() => this.hud.center(me.out ? 'Round in progress. You can watch until the next one starts.' : `Battle Royale · ${game.lives > 1 ? game.lives + ' notes each · ' : ''}last head standing wins`, '', 3.5), 300);
   }
 
   endMatchView() {
+    this.spec = null; this.fast = false; this.input.noLock = false;
     this.input.enabled = false;
     this.input.unlock();
     this.hud.show(false);
@@ -185,7 +238,12 @@ class App {
     document.body.classList.remove('playing');
     this.input.unlock();
     document.getElementById('touch').hidden = true;
-    this.ui.go('pause', { code: this.session?.code, online: this.session?.type !== 'solo', host: this.session?.type === 'host' });
+    this.ui.go('pause', this.pauseData());
+  }
+
+  pauseData() {
+    const S = this.session;
+    return { code: S?.code, online: S?.type !== 'solo', host: S?.type === 'host', publicRoom: !!S?.public, slot: S?.slot };
   }
 
   resume() {
@@ -193,11 +251,11 @@ class App {
     this.state = 'play';
     this.ui.showMenu(false);
     this.applySettings();
-    if (!this.touchMode) this.input.lock();
+    if (!this.touchMode && !this.input.noLock) this.input.lock();
   }
 
   menuBack(target) {
-    if (target === 'pause') return this.ui.go('pause', { code: this.session?.code, online: this.session?.type !== 'solo', host: this.session?.type === 'host' });
+    if (target === 'pause') return this.ui.go('pause', this.pauseData());
     if (target === 'lobby') return this.session?.showLobby ? this.session.showLobby() : this.ui.go('home');
     if (target === 'closeRoom' || target === 'leaveRoom') { this.session?.close(); this.session = null; return this.ui.go('home'); }
     this.ui.go('home');
@@ -231,6 +289,7 @@ class App {
       this.hud.setBuffer(this.buffer);
     };
     h.primary = () => {
+      if (this.spec) return this.specCycle(1);
       if (!this.canAct()) return;
       const p = this.game.local;
       if (!p.alive || this.game.phase === 'end') return;
@@ -245,6 +304,7 @@ class App {
       this.session.requestThrow(g);
     };
     h.cycle = (dir) => {
+      if (this.spec) { if (this.spec.god) { this.spec.yaw += dir * 0.4; } else this.specCycle(dir); return; }
       if (!this.canAct()) return;
       const i = GADGETS.indexOf(this.view.gadget);
       this.view.gadget = GADGETS[(i + (dir > 0 ? 1 : -1) + GADGETS.length) % GADGETS.length];
@@ -272,13 +332,33 @@ class App {
     };
     h.mute = () => { this.settings.volume = this.settings.volume > 0 ? 0 : 0.7; this.applySettings(); this.hud.center(this.settings.volume ? 'Sound on' : 'Sound off', '', 0.8); };
     h.toggleZoom = () => { this.input.zoomToggle = !this.input.zoomToggle; };
+    h.arrow = (dir) => { if (this.spec && this.state === 'play') this.specCycle(dir); };
+    h.view = () => { if (this.spec && this.state === 'play') this.specToggle(); };
+    h.wheel = (dir) => {
+      if (!this.spec) return;
+      if (this.spec.god) { const max = Math.max(this.game.map.width, this.game.map.depth) * 1.3; this.spec.h = Math.max(10, Math.min(max, this.spec.h * (dir > 0 ? 1.12 : 1 / 1.12))); }
+      else this.specCycle(dir);
+    };
+    h.pick = (x, y) => {
+      if (!this.spec || this.state !== 'play') return;
+      if (!this.spec.god) return this.specCycle(1);
+      let best = null, bd = 70;
+      for (const p of this.game.players.values()) {
+        if (!p.alive) continue;
+        const s = this.renderer.project(p.x, p.y + 1.2, p.z);
+        if (!s) continue;
+        const d = Math.hypot(s.x - x, s.y - y);
+        if (d < bd) { bd = d; best = p; }
+      }
+      if (best) { this.spec.target = best.id; this.spec.god = false; this.spec.orbit = 0; audio.ui(); }
+    };
     h.score = () => { this.touchScore = !this.touchScore; };
     h.lockChange = (locked, failed) => {
       if (failed) {
         if (this.state === 'play') this.ui.toast("Mouse capture isn't available here. Drag to look, G to throw.", 4500);
         return;
       }
-      if (!locked && this.state === 'play' && !this.touchMode && !this.chatOpen && this.game && this.game.phase !== 'end') this.pause();
+      if (!locked && this.state === 'play' && !this.touchMode && !this.chatOpen && !this.input.noLock && this.game && this.game.phase !== 'end') this.pause();
     };
   }
 
@@ -302,7 +382,7 @@ class App {
     this.chatOpen = false;
     document.getElementById('chatform').hidden = true;
     document.getElementById('chatin').blur();
-    if (this.state === 'play' && !this.touchMode) this.input.lock();
+    if (this.state === 'play' && !this.touchMode && !this.input.noLock) this.input.lock();
   }
 
   // ---------------------------------------------------------------- game events
@@ -323,7 +403,9 @@ class App {
           r.effects?.poof(hx, hy, hz, v.team ? TEAM_COLOR[v.team] : v.shirt);
           if (ev.v !== me) audio.killAt([hx, hy, hz]);
         }
-        this.hud.killFeed(a, v, ev.code, ev.a === me || ev.v === me);
+        if (ev.zone) this.hud.feed(`${this.hud.name(v)} got caught by the zone`, ev.v === me);
+        else this.hud.killFeed(a, v, ev.code, ev.a === me || ev.v === me);
+        if (g.br && ev.v !== me && g.phase === 'play') { const left = g.aliveCount(); if (left > 1 && left <= 5) this.hud.center(`${left} left`, '', 1.4); }
         if (ev.a === me) {
           clearTimeout(this.pendingT); this.pending = false;
           this.hud.setBuffer(this.buffer, 'hit');
@@ -338,7 +420,25 @@ class App {
           this.input.zoomToggle = false;
           this.view.mode = 'death';
           audio.died();
+          if (g.br && v && v.place > 1) this.hud.big(`#${v.place}`);
         }
+        break;
+      }
+      case 'peel': {
+        const a = P(ev.a), v = P(ev.v);
+        if (v) {
+          const [hx, hy, hz] = g.forehead(v);
+          this.renderer.effects?.confetti(hx, hy, hz, 36, ['#ffe45c', '#ff9ecb', '#7ef0c8', '#ffffff'], 3.5);
+          if (ev.v !== me) audio.bounce([hx, hy, hz]);
+        }
+        this.hud.feed(`${this.hud.name(a)}<span class="code">${esc(ev.code)}</span>${this.hud.name(v)} <span style="opacity:.7">note ripped</span>`, ev.a === me || ev.v === me);
+        if (ev.a === me) {
+          clearTimeout(this.pendingT); this.pending = false;
+          this.hud.flashResult('hit', `Ripped ${v ? v.name : 'their'}'s note off. New number underneath!`);
+          this.buffer = '';
+          audio.pickup();
+        }
+        if (ev.v === me) { this.hud.center(`Note ripped off! New number: ${ev.num}`, 'bad', 2.4); audio.jam(); }
         break;
       }
       case 'miss':
@@ -406,7 +506,9 @@ class App {
         break;
       case 'chat': {
         const p = P(ev.id);
-        this.hud.chat(p ? p.name : '?', ev.msg, p?.team);
+        // in Battle Royale, knocked-out players only talk to each other
+        if (ev.dead && g.local && g.local.alive && g.phase === 'play') break;
+        this.hud.chat(p ? (ev.dead ? p.name + ' (out)' : p.name) : '?', ev.msg, p?.team);
         break;
       }
     }
@@ -416,7 +518,7 @@ class App {
     const g = this.game;
     const me = g.local;
     const won = results.teams ? me && me.team === results.winner : results.winner === g.localId;
-    this.hud.big(won ? 'YOU WIN' : 'MATCH OVER');
+    this.hud.big(won ? (results.br ? 'LAST HEAD STANDING' : 'YOU WIN') : 'MATCH OVER');
     if (won) audio.win(); else audio.lose();
     this.state = 'end';
     document.body.classList.remove('playing');
@@ -426,8 +528,79 @@ class App {
       this.endShown = true;
       document.getElementById('touch').hidden = true;
       const type = this.session?.type;
-      this.ui.go('end', { results, you: g.localId, canRestart: type !== 'client', host: type === 'host', online: type !== 'solo', ctf: g.mode.id === 'ctf' });
+      this.ui.go('end', { results, you: g.localId, canRestart: type !== 'client' && !this.session?.public, host: type === 'host' && !this.session?.public, online: type !== 'solo', ctf: g.mode.id === 'ctf', publicRoom: !!this.session?.public });
     }, 2600);
+  }
+
+  // ---------------------------------------------------------------- spectating (Battle Royale)
+  aliveList() { return [...this.game.players.values()].filter(p => p.alive).sort((a, b) => a.id - b.id); }
+
+  enterSpectate() {
+    const g = this.game, me = g.local;
+    const W = g.map.width, D = g.map.depth;
+    const killer = me && g.players.get(me.killedBy);
+    const first = killer && killer.alive ? killer : this.aliveList()[0];
+    this.spec = { god: !first, target: first ? first.id : null, orbit: 0, tilt: 0, x: g.zone ? g.zone.x : 0, z: g.zone ? g.zone.z : 0, h: Math.max(W, D) * 0.85, yaw: 0 };
+    this.input.noLock = true;
+    this.input.unlock();
+    this.input.zoomToggle = false;
+    this.hud.el.center.className = ''; this.hud.centerT = 0;
+    document.getElementById('toast').classList.remove('show');
+    this.applySettings();
+  }
+
+  specCycle(dir) {
+    if (!this.spec || !this.game) return;
+    const list = this.aliveList();
+    if (!list.length) return;
+    const i = list.findIndex(p => p.id === this.spec.target);
+    const next = list[((i < 0 ? 0 : i + dir) % list.length + list.length) % list.length];
+    this.spec.target = next.id; this.spec.god = false; this.spec.orbit = 0;
+    audio.ui();
+  }
+
+  specToggle() {
+    const S = this.spec; if (!S) return;
+    if (!S.god) {
+      const t = this.game.players.get(S.target);
+      if (t) { S.x = t.x; S.z = t.z; }
+      S.god = true;
+    } else {
+      if (!this.game.players.get(S.target)?.alive) { const l = this.aliveList(); if (l.length) S.target = l[0].id; else return; }
+      S.god = false;
+    }
+    audio.ui();
+  }
+
+  controlSpectator(dt) {
+    const g = this.game, S = this.spec;
+    const [dx, dy] = this.input.takeLook();
+    // keep following someone who is still in
+    if (!S.god) {
+      const t = g.players.get(S.target);
+      if (!t || !t.alive) {
+        const killer = t && g.players.get(t.killedBy);
+        const l = this.aliveList();
+        if (killer && killer.alive) S.target = killer.id;
+        else if (l.length) S.target = l[0].id;
+        else S.god = true;
+      }
+    }
+    if (S.god) {
+      const k = S.h * 0.0016;
+      const fx = -Math.sin(S.yaw), fz = -Math.cos(S.yaw), rx = Math.cos(S.yaw), rz = -Math.sin(S.yaw);
+      S.x += (-rx * dx + fx * dy) * k; S.z += (-rz * dx + fz * dy) * k;
+      if (this.state === 'play' && !this.chatOpen) {
+        const inp = this.input.state();
+        S.x += (rx * inp.right + fx * inp.fwd) * S.h * 0.9 * dt;
+        S.z += (rz * inp.right + fz * inp.fwd) * S.h * 0.9 * dt;
+      }
+      S.x = Math.max(-g.map.width / 2, Math.min(g.map.width / 2, S.x));
+      S.z = Math.max(-g.map.depth / 2, Math.min(g.map.depth / 2, S.z));
+    } else {
+      S.orbit -= dx * 0.006;
+      S.tilt = Math.max(-0.9, Math.min(4, S.tilt + dy * 0.012));
+    }
   }
 
   // ---------------------------------------------------------------- per frame
@@ -532,20 +705,29 @@ class App {
     if (g) {
       const frozen = this.state === 'paused' && this.session?.type === 'solo';
       if (!frozen) {
-        if (this.game) this.controlLocal(dt);
+        if (this.game) { if (this.spec) this.controlSpectator(dt); else this.controlLocal(dt); }
         g.update(dt);
+        // solo spectators can fast-forward the rest of the round
+        if (this.game && this.fast && this.spec && this.session?.type === 'solo') for (let i = 0; i < 3; i++) g.update(dt);
         if (this.game) { this.session?.tick(dt); this.sounds(dt); }
       }
       if (this.game) {
         const me = this.game.local;
-        this.view.mode = me && me.alive ? 'fp' : me && me.deathPos ? 'death' : 'wait';
+        const gm = this.game;
+        const specNow = gm.br && me && !me.alive && (me.out || me.spawned) && (me.deathT == null || gm.time - me.deathT > 2.6) && (this.state === 'play' || this.state === 'paused');
+        if (specNow && !this.spec) this.enterSpectate();
+        if (this.spec && me && me.alive) { this.spec = null; this.input.noLock = false; }
+        if (this.spec) { this.view.mode = this.spec.god || !this.spec.target ? 'spec-god' : 'spec-follow'; this.view.spec = this.spec; }
+        else this.view.mode = me && me.alive ? 'fp' : me && me.deathPos ? 'death' : 'wait';
         this.hud.update(dt, this.game, me, this.view);
+        this.hud.spectator(gm, this.view, this.spec ? { target: gm.players.get(this.spec.target), late: me && !me.spawned, canFast: this.session?.type === 'solo', fast: this.fast } : null);
         this.updateWatch(dt);
         const showScore = this.state === 'play' && (this.input.state().score || this.touchScore);
         this.hud.scoreboard(this.game, showScore);
-        const ctp = this.state === 'play' && !this.touchMode && !this.input.locked && !this.input.lockFailed && !this.chatOpen;
+        const ctp = this.state === 'play' && !this.touchMode && !this.input.locked && !this.input.lockFailed && !this.chatOpen && !this.input.noLock;
         this.hud.el.ctp.hidden = !ctp;
-        if (me) audio.setListener(me.x, me.y + 1.6, me.z, me.yaw);
+        if (me && me.alive) audio.setListener(me.x, me.y + 1.6, me.z, me.yaw);
+        else { const c = this.renderer.camera; audio.setListener(c.position.x, c.position.y, c.position.z, c.rotation.y); }
       } else {
         const c = this.renderer.camera.position;
         audio.setListener(c.x, c.y, c.z, 0);

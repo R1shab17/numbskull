@@ -5,7 +5,7 @@
 //    mirrors everything else from host events + snapshots.
 // Discrete changes travel as events ("kill", "spawn", "det", ...) that every
 // machine applies with the same applyEvent(), so state stays in step.
-import { CFG, MODES, TEAM, GADGETS, STREAKS, DIFFICULTY, BOT_NAMES, SHIRT_COLORS, SKIN_TONES, HATS, MAX_PLAYERS } from './config.js';
+import { CFG, MODES, TEAM, GADGETS, STREAKS, DIFFICULTY, BOT_NAMES, SHIRT_COLORS, SKIN_TONES, HATS, MAX_PLAYERS, ZONE } from './config.js';
 import { World } from './world.js';
 import { MAPS } from './maps.js';
 import { BotBrain } from './bot.js';
@@ -57,9 +57,70 @@ export class Game {
       }
     }
     this.pickups = (this.map.pickups || []).map(([x, z]) => ({ x, z, y: this.world.heightAt(x, z) + 0.75, active: true, t: 0 }));
+    // Battle Royale: one life each and a shrinking zone
+    this.br = this.mode.id === 'br';
+    this.lives = this.br ? Math.max(1, Math.min(3, opts.lives || 2)) : 1;
+    this.zone = null;
+    if (this.br) {
+      const W = this.map.width, D = this.map.depth;
+      const R0 = Math.hypot(W / 2, D / 2) + 4;
+      const x = rand(-W * 0.08, W * 0.08), z = rand(-D * 0.08, D * 0.08);
+      this.zone = { x, z, r: R0, R0, nx: x, nz: z, nr: R0, stage: -1, state: 'wait', t: 0, dur: 0, fx: x, fz: z, fr: R0 };
+      if (this.authority) this.nextZoneStage();
+    }
   }
 
   on(fn) { this.listeners.push(fn); }
+
+  // ---------------------------------------------------------------- BR zone
+  nextZoneStage() {
+    const z = this.zone;
+    z.stage++;
+    const st = ZONE.stages[z.stage];
+    if (!st) { z.state = 'final'; z.t = 0; z.x = z.nx; z.z = z.nz; z.r = z.nr; return; }
+    z.state = 'wait'; z.t = st.wait; z.dur = st.shrink;
+    const nr = st.to * z.R0;
+    const room = Math.max(0, z.r - nr);
+    let cx = z.x, cz = z.z;
+    // the next circle sits inside the current one, centred on somewhere you can actually stand
+    for (let k = 0; k < 40; k++) {
+      const [x, zz] = this.world.randomNavPoint();
+      if (Math.hypot(x - z.x, zz - z.z) <= room * 0.9 && Math.abs(x) < this.world.hw - 3 && Math.abs(zz) < this.world.hd - 3) { cx = x; cz = zz; break; }
+    }
+    z.nx = cx; z.nz = cz; z.nr = nr;
+  }
+
+  updateZone(dt) {
+    const z = this.zone;
+    if (!z || this.phase !== 'play') return;
+    if (this.authority) {
+      z.t -= dt;
+      if (z.state === 'wait' && z.t <= 0) { z.state = 'shrink'; z.t = z.dur; z.fx = z.x; z.fz = z.z; z.fr = z.r; }
+      else if (z.state === 'shrink') {
+        const k = 1 - Math.max(0, z.t) / (z.dur || 1);
+        z.x = lerp(z.fx, z.nx, k); z.z = lerp(z.fz, z.nz, k); z.r = lerp(z.fr, z.nr, k);
+        if (z.t <= 0) this.nextZoneStage();
+      }
+    } else if (z.t > 0) z.t -= dt;
+    for (const p of this.players.values()) {
+      if (!p.alive) { p.outT = 0; continue; }
+      const outside = Math.hypot(p.x - z.x, p.z - z.z) > z.r;
+      p.outT = outside ? (p.outT || 0) + dt : Math.max(0, (p.outT || 0) - dt * 2);
+      if (this.authority && outside && p.outT > ZONE.grace && this.phase === 'play') {
+        this.emit({ k: 'kill', a: 0, v: p.id, code: 'ZONE', zone: true });
+        this.checkWin();
+      }
+    }
+  }
+
+  inZone(x, z, margin = 0, next = false) {
+    const Z = this.zone;
+    if (!Z) return true;
+    const cx = next ? Z.nx : Z.x, cz = next ? Z.nz : Z.z, r = next ? Z.nr : Z.r;
+    return Math.hypot(x - cx, z - cz) <= r - margin;
+  }
+
+  aliveCount() { let n = 0; for (const p of this.players.values()) if (p.alive) n++; return n; }
 
   // ---------------------------------------------------------------- players
   makePlayer(o) {
@@ -82,6 +143,7 @@ export class Game {
     const p = this.makePlayer(o);
     if (this.teams && !p.team) p.team = this.smallerTeam();
     if (!this.teams) p.team = 0;
+    if (this.br && this.phase !== 'countdown' && !this.attract) p.out = true;
     this.players.set(p.id, p);
     this.order.push(p.id);
     if (p.isBot && this.authority) p.brain = new BotBrain(this, p, DIFFICULTY[o.difficulty || this.difficulty]);
@@ -193,6 +255,8 @@ export class Game {
         Object.assign(p, { x: ev.x, y: ev.y, z: ev.z, tx: ev.x, ty: ev.y, tz: ev.z, yaw: ev.yaw, tyaw: ev.yaw, pitch: 0, vx: 0, vy: 0, vz: 0,
           alive: true, num: ev.num, protect: CFG.spawnProtect, blind: 0, jam: 0, carrying: 0, zoom: false, crouch: false, camCd: 0, hasT: false });
         if (ev.team) p.team = ev.team;
+        p.spawned = true; p.outT = 0; p.notes = this.lives;
+        if (this.br) p.protect = ZONE.dropProtect + Math.max(0, this.phase === 'countdown' ? this.phaseT : 0);
         for (const g of GADGETS) p.inv[g] = CFG.gadgets[g].start;
         if (p.brain) p.brain.onSpawn();
         break;
@@ -201,8 +265,9 @@ export class Game {
         const a = P(ev.a), v = P(ev.v);
         if (!v) break;
         v.alive = false; v.respawnT = CFG.respawnTime; v.deaths++; v.streak = 0; v.zoom = false;
-        v.killedBy = ev.a; v.killedCode = ev.code; v.deathPos = [v.x, v.y, v.z];
-        this.lastNoise = { x: v.x, z: v.z, t: this.time };
+        v.killedBy = ev.a; v.killedCode = ev.code; v.deathPos = [v.x, v.y, v.z]; v.deathT = this.time;
+        if (!ev.zone) this.lastNoise = { x: v.x, z: v.z, t: this.time };
+        if (this.br) { v.out = true; v.place = this.aliveCount() + 1; }
         if (v.carrying) this.dropFlag(v);
         if (a) {
           a.kills++; a.streak++; a.reads++;
@@ -211,6 +276,12 @@ export class Game {
           if (this.teams && this.mode.id === 'tdm') this.teamScore[a.team]++;
         }
         if (v.brain) v.brain.onDeath();
+        break;
+      }
+      case 'peel': {
+        const a = P(ev.a), v = P(ev.v);
+        if (v) { v.notes = Math.max(1, (v.notes || 2) - 1); v.num = ev.num; v.protect = 1.2; v.peeledBy = ev.a; }
+        if (a) { a.reads++; a.hits = (a.hits || 0) + 1; if (ev.ms && (!a.fastest || ev.ms < a.fastest)) a.fastest = ev.ms; }
         break;
       }
       case 'miss': {
@@ -267,7 +338,7 @@ export class Game {
         }
         break;
       }
-      case 'leave': this.removePlayer(ev.id); break;
+      case 'leave': this.removePlayer(ev.id); if (this.authority && this.br) this.checkWin(); break;
       case 'team': { const p = P(ev.id); if (p) p.team = ev.team; break; }
       case 'chat': break;
     }
@@ -293,6 +364,11 @@ export class Game {
     // remote shooters get a little slack for network delay
     const slack = s.remote ? { range: (s.zoom ? CFG.binoRange : CFG.killRange) + 3, fov: (s.zoom ? CFG.binoFov : s.fov) * 1.12 } : {};
     if (!this.canSee(s, target, slack)) { this.emit({ k: 'miss', id, code, reason: 'sight' }); return; }
+    if (this.br && (target.notes || 1) > 1) {
+      // Battle Royale: the top sticky note comes off and a new number is underneath
+      this.emit({ k: 'peel', a: id, v: target.id, code, num: this.uniqueNumber(), ms: ms | 0 });
+      return;
+    }
     this.emit({ k: 'kill', a: id, v: target.id, code, ms: ms | 0, dist: Math.round(Math.hypot(s.x - target.x, s.z - target.z)) });
     this.checkWin();
   }
@@ -433,7 +509,7 @@ export class Game {
 
     for (const p of this.players.values()) {
       if (!p.alive) {
-        if (A) {
+        if (A && !(this.br && (p.out || p.spawned))) {
           p.respawnT -= dt;
           if (p.respawnT <= 0 && this.phase !== 'end') this.spawn(p);
         }
@@ -469,6 +545,7 @@ export class Game {
       }
     }
 
+    this.updateZone(dt);
     this.updateGrenades(dt);
     for (let i = this.smokes.length - 1; i >= 0; i--) {
       const s = this.smokes[i];
@@ -576,6 +653,11 @@ export class Game {
 
   checkWin() {
     if (this.phase !== 'play' || this.attract) return;
+    if (this.br) {
+      const started = [...this.players.values()].filter(p => p.spawned).length;
+      if (started >= 2 && this.aliveCount() <= 1) this.endMatch();
+      return;
+    }
     if (this.teams) {
       if (this.teamScore[1] >= this.scoreLimit || this.teamScore[2] >= this.scoreLimit) this.endMatch();
     } else {
@@ -587,11 +669,18 @@ export class Game {
   endMatch() {
     if (this.phase === 'end') return;
     let winner;
-    if (this.teams) winner = this.teamScore[1] > this.teamScore[2] ? 1 : this.teamScore[2] > this.teamScore[1] ? 2 : 0;
+    if (this.br) {
+      // survivors get the top places: last one standing first, then by reads
+      const alive = [...this.players.values()].filter(p => p.alive).sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
+      alive.forEach((p, i) => { p.place = i + 1; });
+      const first = [...this.players.values()].find(p => p.place === 1);
+      winner = first ? first.id : 0;
+    } else if (this.teams) winner = this.teamScore[1] > this.teamScore[2] ? 1 : this.teamScore[2] > this.teamScore[1] ? 2 : 0;
     else { const l = this.leader(); winner = l ? l.id : 0; const tie = [...this.players.values()].filter(p => p.kills === l?.kills).length > 1; if (tie) winner = 0; }
     const results = {
       winner, teams: this.teams, teamScore: [...this.teamScore],
-      players: [...this.players.values()].map(p => ({ id: p.id, name: p.name, team: p.team, kills: p.kills, deaths: p.deaths, caps: p.caps, misses: p.misses, best: p.bestStreak, fastest: p.fastest, isBot: p.isBot })),
+      br: this.br,
+      players: [...this.players.values()].map(p => ({ id: p.id, name: p.name, team: p.team, kills: p.kills, deaths: p.deaths, caps: p.caps, misses: p.misses, best: p.bestStreak, fastest: p.fastest, isBot: p.isBot, place: p.place || 0, out: !!p.out && !p.spawned })),
     };
     this.emit({ k: 'phase', phase: 'end', t: 0, results });
   }
@@ -600,17 +689,17 @@ export class Game {
   // Full state for a joining client.
   fullState() {
     return {
-      opts: { mapId: this.mapId, mode: this.mode.id, digits: this.digits, scoreLimit: this.scoreLimit, timeLimit: this.timeLimit, difficulty: this.difficulty },
+      opts: { mapId: this.mapId, mode: this.mode.id, digits: this.digits, scoreLimit: this.scoreLimit, timeLimit: this.timeLimit, difficulty: this.difficulty, lives: this.lives },
       phase: this.phase, phaseT: this.phaseT, timeLeft: this.timeLeft, teamScore: this.teamScore, gid: this.gid,
       players: [...this.players.values()].map(p => this.playerInit(p)),
       flags: this.flags, pickups: this.pickups.map(pk => ({ active: pk.active, t: pk.t })),
-      smokes: this.smokes, distracts: this.distracts, grenades: this.grenades,
+      smokes: this.smokes, distracts: this.distracts, grenades: this.grenades, zone: this.zone,
     };
   }
 
   playerInit(p) {
     return { id: p.id, name: p.name, isBot: p.isBot, team: p.team, shirt: p.shirt, skin: p.skin, hat: p.hat,
-      state: { x: p.x, y: p.y, z: p.z, yaw: p.yaw, alive: p.alive, num: p.num, kills: p.kills, deaths: p.deaths, caps: p.caps, misses: p.misses, carrying: p.carrying, protect: p.protect, respawnT: p.respawnT, inv: { ...p.inv }, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, hasT: true, streak: p.streak, bestStreak: p.bestStreak } };
+      state: { x: p.x, y: p.y, z: p.z, yaw: p.yaw, alive: p.alive, num: p.num, kills: p.kills, deaths: p.deaths, caps: p.caps, misses: p.misses, carrying: p.carrying, protect: p.protect, respawnT: p.respawnT, inv: { ...p.inv }, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, hasT: true, streak: p.streak, bestStreak: p.bestStreak, out: !!p.out, spawned: !!p.spawned, place: p.place || 0, notes: p.notes || 1 } };
   }
 
   loadState(s) {
@@ -625,6 +714,7 @@ export class Game {
     for (const sm of s.smokes || []) this.smokes.push({ ...sm });
     for (const d of s.distracts || []) this.distracts.push({ ...d });
     for (const g of s.grenades || []) this.grenades.push({ ...g });
+    if (s.zone && this.zone) Object.assign(this.zone, s.zone);
   }
 
   // compact snapshot of every player's continuous state
@@ -634,7 +724,9 @@ export class Game {
       const fl = (p.alive ? 1 : 0) | (p.crouch ? 2 : 0) | (p.zoom ? 4 : 0) | (p.onGround ? 8 : 0) | (p.protect > 0 ? 16 : 0);
       arr.push(p.id, Math.round(p.x * 100), Math.round(p.y * 100), Math.round(p.z * 100), Math.round(p.yaw * 1000), Math.round(p.pitch * 1000), fl, Math.round(p.blind * 100));
     }
-    return { t: 'snap', p: arr, tl: Math.round(this.timeLeft * 10), ph: this.phase };
+    const z = this.zone;
+    const zs = z ? [Math.round(z.x * 10), Math.round(z.z * 10), Math.round(z.r * 10), Math.round(z.nx * 10), Math.round(z.nz * 10), Math.round(z.nr * 10), Math.round(Math.max(0, z.t) * 10), z.state === 'wait' ? 0 : z.state === 'shrink' ? 1 : 2] : null;
+    return { t: 'snap', p: arr, tl: Math.round(this.timeLeft * 10), ph: this.phase, zs };
   }
 
   applySnapshot(s) {
@@ -651,6 +743,11 @@ export class Game {
       p.blind = a[i + 7] / 100;
     }
     if (s.tl != null) this.timeLeft = s.tl / 10;
+    if (s.zs && this.zone) {
+      const z = this.zone, a = s.zs;
+      z.x = a[0] / 10; z.z = a[1] / 10; z.r = a[2] / 10; z.nx = a[3] / 10; z.nz = a[4] / 10; z.nr = a[5] / 10; z.t = a[6] / 10;
+      z.state = a[7] === 0 ? 'wait' : a[7] === 1 ? 'shrink' : 'final';
+    }
   }
 
   // state the client reports about itself

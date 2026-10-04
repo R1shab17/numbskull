@@ -27,10 +27,15 @@ export class Input {
     document.addEventListener('pointerlockerror', () => this.lockError());
     addEventListener('mousemove', (e) => {
       if (this.locked) { this.dx += e.movementX; this.dy += e.movementY; }
-      else if (this.dragLook && this.enabled) { this.dx += e.movementX; this.dy += e.movementY; }
+      else if (this.dragLook && this.enabled) { this.dx += e.movementX; this.dy += e.movementY; this._moved = (this._moved || 0) + Math.abs(e.movementX) + Math.abs(e.movementY); }
     });
     canvas.addEventListener('mousedown', (e) => {
       if (!this.enabled) return;
+      if (this.noLock) {
+        // spectating: plain mouse, drag to move the camera, click to pick a player
+        this.dragLook = true; this._down = [e.clientX, e.clientY]; this._moved = 0;
+        return;
+      }
       if (!this.locked && !this.isTouch && !this.lockFailed) { this.lock(true); return; }
       if (this.lockFailed && !this.locked) {
         // no pointer lock available: drag to look, G to throw, right button for binoculars
@@ -41,9 +46,36 @@ export class Input {
       if (e.button === 0) { this.mouseL = true; this.handlers.primary?.(); }
       if (e.button === 2) this.mouseR = true;
     });
-    addEventListener('mouseup', (e) => { if (e.button === 0) this.mouseL = false; if (e.button === 2) this.mouseR = false; this.dragLook = false; });
+    addEventListener('mouseup', (e) => {
+      if (e.button === 0) this.mouseL = false; if (e.button === 2) this.mouseR = false;
+      if (this.noLock && this._down && (this._moved || 0) < 6 && e.target === this.canvas) this.handlers.pick?.(e.clientX, e.clientY);
+      this._down = null; this.dragLook = false;
+    });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-    addEventListener('wheel', (e) => { if (this.enabled && (this.locked || this.lockFailed)) this.handlers.cycle?.(Math.sign(e.deltaY)); }, { passive: true });
+    // touch drag / tap on the 3D view while spectating
+    let tId = null, tx = 0, ty = 0, tMoved = 0;
+    canvas.addEventListener('touchstart', (e) => {
+      if (!this.noLock || tId !== null) return;
+      const t = e.changedTouches[0]; tId = t.identifier; tx = t.clientX; ty = t.clientY; tMoved = 0;
+    }, { passive: true });
+    canvas.addEventListener('touchmove', (e) => {
+      if (!this.noLock) return;
+      for (const t of e.changedTouches) if (t.identifier === tId) {
+        const mx = t.clientX - tx, my = t.clientY - ty; tx = t.clientX; ty = t.clientY;
+        this.dx += mx * 1.6; this.dy += my * 1.6; tMoved += Math.abs(mx) + Math.abs(my);
+      }
+    }, { passive: true });
+    canvas.addEventListener('touchend', (e) => {
+      for (const t of e.changedTouches) if (t.identifier === tId) {
+        if (this.noLock && tMoved < 8) this.handlers.pick?.(t.clientX, t.clientY);
+        tId = null;
+      }
+    });
+    addEventListener('wheel', (e) => {
+      if (!this.enabled) return;
+      if (this.noLock) { if (e.target === this.canvas) this.handlers.wheel?.(Math.sign(e.deltaY)); return; }
+      if (this.locked || this.lockFailed) this.handlers.cycle?.(Math.sign(e.deltaY));
+    }, { passive: true });
   }
 
   // fromClick: the request came straight from a mouse click, so a failure means
@@ -85,6 +117,8 @@ export class Input {
     if (c === 'KeyT' || c === 'Enter' || c === 'NumpadEnter') { h.chat?.(); return; }
     if (c === 'KeyM') { h.mute?.(); return; }
     if (c === 'KeyZ') { h.toggleZoom?.(); return; }
+    if (c === 'KeyV') { h.view?.(); return; }
+    if (c === 'ArrowLeft' || c === 'ArrowRight') { h.arrow?.(c === 'ArrowLeft' ? -1 : 1); return; }
   }
 
   down(code) { return this.keys.has(code); }
@@ -163,6 +197,9 @@ export class Input {
         else if (key === 'crouch') t.crouch = !t.crouch;
         else if (key === 'zoom') t.zoom = !t.zoom;
         else if (key === 'score') h.score?.();
+        else if (key === 'specPrev') h.arrow?.(-1);
+        else if (key === 'specNext') h.arrow?.(1);
+        else if (key === 'specView') h.view?.();
       };
       const release = (e) => { btn.classList.remove('down'); if (key === 'jump') t.jump = false; btn.classList.toggle('on', (key === 'crouch' && t.crouch) || (key === 'zoom' && t.zoom)); };
       btn.addEventListener('touchstart', press, { passive: false });

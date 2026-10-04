@@ -4,7 +4,7 @@
 
 Numbskull is a free, open-source first-person party shooter that runs in any modern browser. Everybody has a number stuck to their forehead. Get a clear look at someone's face, type their number on your keyboard, and they pop into confetti. No guns, no aiming, just reading under pressure.
 
-Play against bots on your own, or open an online room and have up to 20 people join with a 4-letter code. No accounts, no installs, no servers to run.
+Press **Play online** to drop into a public Battle Royale with whoever else is playing, play against bots on your own, or open a private room and have up to 20 people join with a 4-letter code. No accounts, no installs, no servers to run.
 
 ![Gameplay: a bot with 3964 on its forehead, the player has typed 7 and 3](docs/gameplay.png)
 
@@ -12,7 +12,8 @@ Play against bots on your own, or open an online room and have up to 20 people j
 
 **[Play now at r1shab17.github.io/numbskull](https://r1shab17.github.io/numbskull/)**
 
-- **With friends:** one person picks **Host a room** and shares the 4-letter code. Everyone else picks **Join a room** and types it.
+- **With anyone:** press **Play online**. You land in a public Battle Royale room; rounds run back to back and bots fill the empty spots.
+- **With friends:** one person picks **Host a private room** and shares the 4-letter code. Everyone else picks **Join with a code** and types it.
 - **Offline:** download `docs/index.html` and open it. It's a single self-contained file (about 0.9 MB) and works without internet against bots.
 
 ## How it works
@@ -31,6 +32,15 @@ Play against bots on your own, or open an online room and have up to 20 people j
 | Deathmatch | Every head for themselves. First to the read limit wins. |
 | Team Deathmatch | Red vs Blue. Team score to win. |
 | Capture the Flag | Grab the enemy flag and bring it home. Your own flag has to be at your base to score. |
+| Battle Royale | No respawns. Everyone starts with a stack of 1–3 sticky notes; each read rips one off and reveals a new number. A pink zone keeps shrinking. Last one standing wins. |
+
+### Battle Royale and spectating
+
+- The zone shrinks in five stages. The dotted circle on the minimap shows where it closes to next; stay outside it for more than 4 seconds and you're out.
+- Nobody can be read for the first few seconds of a round, so everyone gets a chance to scatter.
+- Once you're out you spectate. Follow any player with `←` `→` (or the on-screen arrows), or press `V` for the god view: drag or WASD to pan, wheel to zoom, `Q`/`E` to rotate, click a player to follow them. Every head shows its name and number while you watch.
+- Knocked-out players chat only with each other until the round ends.
+- Solo spectators can fast-forward the rest of the round.
 
 ### Maps
 
@@ -107,8 +117,10 @@ Maps are lists of boxes. Add a function to `src/maps.js` that returns the same s
 
 Online rooms are peer-to-peer. The host's browser runs the match (bots, rules and kill checks) and every other player connects straight to it over WebRTC. [PeerJS](https://peerjs.com) is used only to introduce the browsers to each other, through its free public server.
 
-- Rooms hold up to 20 players including bots. People can join a match already in progress.
-- If the host leaves, the room closes.
+- Rooms hold up to 20 players including bots. People can join a match already in progress (in Battle Royale they spectate until the next round).
+- **Play online** uses a set of numbered public rooms. You join the lowest-numbered room with space; if it doesn't exist yet, your browser opens it and becomes the host. When a public host leaves, everyone in that room is moved to another one automatically, and a host left alone in an overflow room moves into the main one between rounds.
+- A host keeps the match running even if they switch to another tab.
+- If the host of a private room leaves, the room closes.
 - A few very strict networks (some offices and schools) block direct browser-to-browser connections. Playing from home networks and phones normally works.
 - Online rooms don't work when the game is embedded somewhere that blocks WebRTC. Hosting the page yourself avoids that.
 

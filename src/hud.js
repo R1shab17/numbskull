@@ -15,6 +15,8 @@ export class Hud {
       mynote: $('mynote'), mynum: $('mynum'), eye: $('eye'), typebar: $('typebar'), slots: $('slots'), jambar: $('jambar').firstElementChild, hint: $('typehint'),
       gadgets: $('gadgets'), photo: $('photo'), photocv: $('photocv'), phototime: $('phototime'), death: $('death'), deathby: $('deathby'), deathcode: $('deathcode'), respawn: $('respawn'),
       chatlog: $('chatlog'), chatform: $('chatform'), chatin: $('chatin'), scoreboard: $('scoreboard'), ctp: $('clicktoplay'), fps: $('fps'),
+      zonebar: $('zonebar'), zonewarn: $('zonewarn'), zonesecs: $('zonesecs'),
+      specName: $('specName'), specInfo: $('specInfo'), specLbl: $('specLbl'), specView: $('specView'), specFast: $('specFast'), specHint: $('specHint'),
     };
     this.buffer = '';
     this.digits = 4;
@@ -35,6 +37,9 @@ export class Hud {
     this.el.feed.innerHTML = '';
     this.el.chatlog.innerHTML = '';
     this.el.ctf.hidden = game.mode.id !== 'ctf';
+    this.el.zonebar.hidden = !game.br;
+    this.el.zonewarn.hidden = true;
+    this.root.classList.remove('spectating');
     this.el.death.hidden = true;
     this.el.photo.hidden = true;
     this.el.scoreboard.hidden = true;
@@ -144,16 +149,29 @@ export class Hud {
     for (const pk of game.pickups) if (pk.active) { const [x, y] = P(pk.x, pk.z); g.fillStyle = '#7ef0c8'; g.fillRect(x - 2, y - 2, 4, 4); }
     for (const sm of game.smokes) { const [x, y] = P(sm.x, sm.z); g.fillStyle = 'rgba(220,225,235,0.55)'; g.beginPath(); g.arc(x, y, sm.r * s, 0, 7); g.fill(); }
     for (const d of game.distracts) { const [x, y] = P(d.x, d.z); g.strokeStyle = '#ff8ad8'; g.lineWidth = 2; g.beginPath(); g.arc(x, y, 3 + (game.time * 8 % 6), 0, 7); g.stroke(); }
+    if (game.zone) {
+      const Z = game.zone;
+      const [zx, zy] = P(Z.x, Z.z);
+      g.save();
+      g.beginPath(); g.rect(0, 0, cv.width, cv.height); g.arc(zx, zy, Math.max(0, Z.r * s), 0, Math.PI * 2, true);
+      g.fillStyle = 'rgba(255,79,139,0.28)'; g.fill('evenodd');
+      g.strokeStyle = '#ff4f8b'; g.lineWidth = 2; g.beginPath(); g.arc(zx, zy, Math.max(0, Z.r * s), 0, Math.PI * 2); g.stroke();
+      if (Z.state !== 'final' && Z.nr < Z.r - 0.5) {
+        const [nx, ny] = P(Z.nx, Z.nz);
+        g.setLineDash([3, 3]); g.strokeStyle = '#ffffff'; g.lineWidth = 1.5; g.beginPath(); g.arc(nx, ny, Math.max(0, Z.nr * s), 0, Math.PI * 2); g.stroke();
+      }
+      g.restore();
+    }
     if (game.mode.id === 'ctf') for (const t of [1, 2]) {
       const f = game.flags[t]; const [x, y] = P(f.x, f.z);
       g.fillStyle = TEAM_COLOR[t]; g.strokeStyle = '#fff'; g.lineWidth = 1.5;
       g.beginPath(); g.moveTo(x, y + 5); g.lineTo(x, y - 7); g.lineTo(x + 7, y - 4); g.lineTo(x, y - 1); g.closePath(); g.fill(); g.stroke();
     }
-    if (local && game.teams) {
+    if (local && (game.teams || (!local.alive && game.br))) {
       for (const p of game.players.values()) {
-        if (!p.alive || p.id === local.id || p.team !== local.team) continue;
+        if (!p.alive || p.id === local.id || (game.teams && p.team !== local.team && local.alive)) continue;
         const [x, y] = P(p.x, p.z);
-        g.fillStyle = TEAM_COLOR[p.team]; g.beginPath(); g.arc(x, y, 3, 0, 7); g.fill();
+        g.fillStyle = p.team ? TEAM_COLOR[p.team] : '#ffe45c'; g.beginPath(); g.arc(x, y, 3, 0, 7); g.fill();
       }
     }
     if (local && local.alive) {
@@ -175,7 +193,13 @@ export class Hud {
     if (tt !== this.lastTimer) { E.timer.textContent = tt; E.timer.classList.toggle('low', game.phase === 'play' && game.timeLeft < 30); this.lastTimer = tt; }
     // scores
     let sl, sr;
-    if (game.teams) {
+    if (game.br) {
+      const alive = game.aliveCount();
+      sl = `<small>Alive</small>${alive}`;
+      sr = `${local ? local.kills : 0}<small>Out</small>`;
+      E.sl.className = 'scorechip'; E.sr.className = 'scorechip alt'; E.sr.style.background = '#fff';
+      E.sl.title = 'Players still in'; E.sr.title = 'Players you knocked out';
+    } else if (game.teams) {
       const lim = game.scoreLimit;
       sl = `<small>Red</small>${game.teamScore[1]}`; sr = `${game.teamScore[2]}<small>Blue</small>`;
       E.sl.className = 'scorechip red' + (game.teamScore[1] > game.teamScore[2] ? ' lead' : '');
@@ -202,11 +226,29 @@ export class Hud {
       if (h !== this._ctf) { E.ctf.innerHTML = h; this._ctf = h; }
     }
 
+    // Battle Royale zone status
+    if (game.br && game.zone) {
+      const Z = game.zone;
+      const secs = Math.ceil(Z.t);
+      let zt;
+      if (game.phase === 'countdown') zt = 'Zone starts shrinking soon';
+      else if (Z.state === 'wait') zt = `Zone shrinks in ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+      else if (Z.state === 'shrink') zt = 'Zone is shrinking';
+      else zt = 'Final zone';
+      if (zt !== this._zt) { E.zonebar.textContent = zt; this._zt = zt; }
+      E.zonebar.classList.toggle('closing', Z.state === 'shrink');
+      const out = local && local.alive && (local.outT || 0) > 0.05 && game.phase === 'play';
+      E.zonewarn.hidden = !out;
+      if (out) E.zonesecs.textContent = Math.max(0, Math.ceil(4 - local.outT));
+    }
+
     if (!local) return;
     // my number
     const num = local.alive ? local.num : '····';
     if (num !== this._num) { E.mynum.textContent = num; this._num = num; }
     E.mynote.classList.toggle('safe', local.protect > 0);
+    const nl = game.br && local.alive ? `On your head · ${local.notes || 1} ${local.notes > 1 ? 'notes' : 'note'} left` : 'On your head';
+    if (nl !== this._nl) { E.mynote.querySelector('.lbl').textContent = nl; this._nl = nl; E.mynote.classList.toggle('stack', game.br && (local.notes || 1) > 1); }
 
     // flash / blind
     const blind = local.alive ? Math.min(1, local.blind * 1.7) : 0;
@@ -250,16 +292,37 @@ export class Hud {
       E.death.hidden = false;
       const k = game.players.get(local.killedBy);
       const by = k ? esc(k.name) : 'someone';
-      const html = `Read by ${by}`;
+      let html = local.killedCode === 'ZONE' ? 'Caught by the zone' : `Read by ${by}`;
+      if (game.br && local.place) html += `<br><span class="place-chip">#${local.place} of ${[...game.players.values()].filter(p => p.spawned).length}</span>`;
       if (this._death !== html + local.killedCode) {
         E.deathby.innerHTML = html;
         E.deathcode.textContent = local.killedCode || '';
         this._death = html + local.killedCode;
       }
-      E.respawn.innerHTML = local.respawnT > 0 || !game.authority ? `Back in <b>${Math.max(1, Math.ceil(local.respawnT))}</b>` : 'Respawning…';
+      E.respawn.innerHTML = game.br ? 'Spectating in a moment…' : local.respawnT > 0 || !game.authority ? `Back in <b>${Math.max(1, Math.ceil(local.respawnT))}</b>` : 'Respawning…';
     } else { E.death.hidden = true; this._death = ''; }
 
     this.drawMinimap(game, local);
+  }
+
+  spectator(game, view, info) {
+    const E = this.el;
+    const on = !!info;
+    this.root.classList.toggle('spectating', on);
+    if (!on) return;
+    const t = info.target;
+    const god = view.mode === 'spec-god';
+    E.specLbl.textContent = info.late ? 'Next round soon · spectating' : god ? 'God view' : 'Spectating';
+    const name = god ? `${game.aliveCount()} left` : t ? t.name : 'nobody';
+    if (E.specName.textContent !== name) E.specName.textContent = name;
+    const inf = god ? 'Click a player to follow them' : t ? `${t.num} · ${t.kills} out · ${'■'.repeat(t.notes || 1)} ${t.notes > 1 ? 'notes' : 'note'}` : '';
+    if (E.specInfo.textContent !== inf) E.specInfo.textContent = inf;
+    E.specView.textContent = god ? 'Follow player' : 'God view';
+    E.specView.classList.toggle('on', god);
+    E.specFast.hidden = !info.canFast;
+    E.specFast.textContent = info.fast ? 'Normal speed' : 'Fast-forward';
+    E.specFast.classList.toggle('on', !!info.fast);
+    E.specHint.textContent = god ? 'WASD or drag to pan · wheel to zoom · Q/E to rotate · V to follow' : '← → switch player · V god view · drag to look around';
   }
 
   setWatched(on, wx, wy) {

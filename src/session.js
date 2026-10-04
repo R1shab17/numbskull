@@ -1,14 +1,22 @@
 // Online sessions. The host runs the real Game and relays it; clients mirror it.
 import { HostNet, ClientNet, onlineSupported } from './net.js';
 import { Game } from './game.js';
-import { MAX_PLAYERS, NET_VERSION } from './config.js';
+import { MAX_PLAYERS, NET_VERSION, PUBLIC } from './config.js';
+import { PUBLIC_PREFIX } from './net.js';
+import { MAP_LIST } from './maps.js';
+
+export const publicId = (slot) => PUBLIC_PREFIX + slot;
 
 const SNAP_RATE = 1 / 15;
 const STATE_RATE = 1 / 20;
 
 export class HostSession {
-  constructor(app) {
+  // opts.public: a Quick play room that runs back-to-back Battle Royale rounds
+  constructor(app, opts = {}) {
     this.app = app;
+    this.public = !!opts.public;
+    this.slot = opts.slot || 0;
+    this.onTaken = opts.onTaken;
     this.type = 'host';
     this.net = null;
     this.code = null;
@@ -22,16 +30,22 @@ export class HostSession {
   open() {
     const app = this.app;
     if (!onlineSupported()) { app.ui.go('message', { title: 'Online rooms unavailable here', text: "This page can't open peer-to-peer connections, which online rooms need. Open Numbskull from its own page (for example a GitHub Pages link) to host or join. Bots work everywhere." }); return; }
-    app.ui.go('message', { title: 'Opening your room…', text: 'Getting a room code from the matchmaking server.', busy: true });
+    if (!this.public) app.ui.go('message', { title: 'Opening your room…', text: 'Getting a room code from the matchmaking server.', busy: true });
     this.lobby = [{ id: 1, ...this.profileInfo(app.profile), host: true }];
     this.net = new HostNet({
-      onReady: (code) => { this.code = code; this.showLobby(); },
+      onReady: (code) => {
+        this.code = code;
+        if (this.public) { this.code = null; this.startMatch(); app.ui.toast('You opened a public room. Others who press Play online will land here.', 4500); }
+        else this.showLobby();
+      },
+      onTaken: () => { this.net = null; this.onTaken?.(); },
       onError: (msg) => { app.ui.go('message', { title: "Couldn't open a room", text: msg }); this.close(true); },
       onConnect: () => {},
       onData: (conn, msg) => this.onData(conn, msg),
       onClose: (conn) => this.onLeave(conn),
     });
-    this.net.start();
+    if (this.public) this.net.start('PUB', publicId(this.slot));
+    else this.net.start();
   }
 
   profileInfo(p) { return { name: (p.name || 'Player').slice(0, 16), shirt: p.shirt, skin: p.skin, hat: p.hat }; }
@@ -52,13 +66,16 @@ export class HostSession {
   settingsChanged() { this.app.saveMatch(); this.showLobby(); }
 
   startMatch() {
-    const app = this.app, M = app.match;
-    const game = new Game({ mapId: M.mapId, mode: M.mode, digits: M.digits, scoreLimit: M.scoreLimit, timeLimit: M.timeLimit, difficulty: M.difficulty, authority: true });
+    const app = this.app;
+    const M = this.public ? { ...PUBLIC.match, mapId: MAP_LIST[Math.floor(Math.random() * MAP_LIST.length)].id, bots: Math.max(0, PUBLIC.fill - this.lobby.length) } : app.match;
+    const game = new Game({ mapId: M.mapId, mode: M.mode, digits: M.digits, scoreLimit: M.scoreLimit, timeLimit: M.timeLimit, difficulty: M.difficulty, lives: M.lives, authority: true });
     for (const lp of this.lobby) {
       const p = game.addPlayer({ id: lp.id, ...this.profileInfo(lp), remote: !lp.host });
       if (lp.host) game.localId = p.id;
     }
     game.addBots(Math.max(0, Math.min(M.bots, MAX_PLAYERS - this.lobby.length)));
+    this.nextRoundAt = null;
+    game.on((ev) => { if (ev.k === 'phase' && ev.phase === 'end' && this.public) this.nextRoundAt = performance.now() + (PUBLIC.intermission + 2.6) * 1000; });
     game.balanceTeams();
     this.inGame = true;
     app.beginMatch(game);
@@ -82,7 +99,7 @@ export class HostSession {
     if (msg.t === 'hello') {
       if (msg.ver !== NET_VERSION) { this.net.send(conn, { t: 'reject', reason: 'Your copy of Numbskull is a different version from the host. Refresh both pages and try again.' }); setTimeout(() => this.net.kick(conn), 300); return; }
       const count = this.inGame && game ? [...game.players.values()].filter(p => !p.isBot).length : this.lobby.length;
-      if (count >= MAX_PLAYERS) { this.net.send(conn, { t: 'reject', reason: 'That room is full.' }); setTimeout(() => this.net.kick(conn), 300); return; }
+      if (count >= MAX_PLAYERS) { this.net.send(conn, { t: 'reject', reason: 'That room is full.', full: true }); setTimeout(() => this.net.kick(conn), 300); return; }
       // ids must not collide with bots already in a running match
       const id = Math.max(this.nextId, game ? game.nextId : 0);
       this.nextId = id + 1;
@@ -114,7 +131,7 @@ export class HostSession {
       case 'photo': if (game && this.inGame) { const p = game.players.get(pid); if (p) { p.camCd = 0; game.takePhoto(pid); } } break;
       case 'chat': {
         const text = String(msg.msg || '').slice(0, 120).trim();
-        if (text && game && this.inGame) game.emit({ k: 'chat', id: pid, msg: text });
+        if (text && game && this.inGame) { const p = game.players.get(pid); game.emit({ k: 'chat', id: pid, msg: text, dead: !!(game.br && p && !p.alive && game.phase === 'play') }); }
         break;
       }
       case 'ping': this.net.send(conn, { t: 'pong', c: msg.c }); break;
@@ -148,12 +165,19 @@ export class HostSession {
     } else this.broadcastLobby();
   }
 
-  sendChat(text) { const g = this.app.game; if (g) g.emit({ k: 'chat', id: g.localId, msg: text.slice(0, 120) }); }
+  sendChat(text) { const g = this.app.game; if (g) { const p = g.local; g.emit({ k: 'chat', id: g.localId, msg: text.slice(0, 120), dead: !!(g.br && p && !p.alive && g.phase === 'play') }); } }
 
   tick(dt) {
     const game = this.app.game;
     this.reapT = (this.reapT || 0) - dt;
     if (this.reapT <= 0) { this.reapT = 1; this.reap(); }
+    if (this.public && this.nextRoundAt && performance.now() > this.nextRoundAt && this.net) {
+      this.nextRoundAt = null;
+      // alone in an overflow room: move to the lowest room so players end up together
+      if (this.slot > 1 && this.lobby.length <= 1) { this.app.quickPlay(1, 0, 'Moving you to a busier room…'); return; }
+      this.startMatch();
+      return;
+    }
     if (!game || !this.net || !this.inGame) return;
     if (game.outEvents.length) {
       this.net.broadcast({ t: 'ev', e: game.outEvents });
@@ -176,27 +200,41 @@ export class HostSession {
 }
 
 export class ClientSession {
-  constructor(app) {
+  // opts.public + opts.onFail(kind): Quick play; kind is 'unavailable' | 'full' | 'timeout' | 'error' | 'lost'
+  constructor(app, opts = {}) {
     this.app = app; this.type = 'client'; this.net = null; this.code = null; this.id = null;
     this.stateT = 0; this.pingT = 0; this.ping = 0; this.inGame = false; this.closed = false;
+    this.public = !!opts.public; this.slot = opts.slot || 0; this.onFail = opts.onFail;
   }
 
   join(code) {
     const app = this.app;
-    this.code = code.toUpperCase();
-    if (!onlineSupported()) { app.ui.joinError("Online rooms can't run on this page. Open Numbskull from its own page to join."); return; }
+    this.code = code ? code.toUpperCase() : null;
+    if (!onlineSupported()) { if (this.public) this.onFail?.('error', "Online play can't run on this page."); else app.ui.joinError("Online rooms can't run on this page. Open Numbskull from its own page to join."); return; }
     this.net = new ClientNet({
       onOpen: () => this.net.send({ t: 'hello', ver: NET_VERSION, profile: { name: app.profile.name, shirt: app.profile.shirt, skin: app.profile.skin, hat: app.profile.hat } }),
       onData: (m) => this.onData(m),
-      onError: (msg) => { if (!this.closed) { if (this.inGame) this.lost(msg); else app.ui.joinError(msg); } this.close(); },
+      onError: (msg, kind) => {
+        if (this.closed) return;
+        if (this.public && !this.inGame) {
+          this.closed = true; this.net.close();
+          const fatal = ['network', 'server-error', 'socket-error', 'socket-closed', 'browser-incompatible', 'ssl-unavailable'];
+          this.onFail?.(kind === 'peer-unavailable' ? 'unavailable' : fatal.includes(kind) ? 'error' : 'timeout', msg);
+          return;
+        }
+        if (this.inGame) this.lost(msg); else app.ui.joinError(msg);
+        this.close();
+      },
       onClose: () => { if (!this.closed) this.lost('The host closed the room or the connection dropped.'); },
     });
-    this.net.start(this.code);
+    if (this.public) this.net.start(null, publicId(this.slot), 12000);
+    else this.net.start(this.code);
   }
 
   lost(text) {
     if (this.closed) return;
     this.closed = true;
+    if (this.public) { this.net?.close(); this.onFail?.('lost', text); return; }
     this.app.abandonMatch();
     this.app.ui.go('message', { title: 'Disconnected', text });
   }
@@ -206,7 +244,11 @@ export class ClientSession {
     this.seen = performance.now();
     const app = this.app;
     switch (m.t) {
-      case 'reject': this.closed = true; app.ui.joinError(m.reason); this.net.close(); break;
+      case 'reject':
+        this.closed = true; this.net.close();
+        if (this.public) this.onFail?.(m.full ? 'full' : 'error', m.reason);
+        else app.ui.joinError(m.reason);
+        break;
       case 'closed': this.lost('The host closed the room.'); break;
       case 'lobby':
         this.lobbyData = m;
@@ -236,7 +278,7 @@ export class ClientSession {
   }
 
   tick(dt) {
-    if (this.seen && performance.now() - this.seen > 10000 && !this.closed) { this.lost('Lost contact with the host.'); this.close(); return; }
+    if (this.seen && performance.now() - this.seen > 7000 && !this.closed) { this.lost('Lost contact with the host.'); this.close(); return; }
     this.pingT -= dt;
     if (this.pingT <= 0 && this.net) { this.pingT = 2; this.net.send({ t: 'ping', c: performance.now() }); }
     const game = this.app.game;

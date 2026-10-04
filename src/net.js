@@ -2,7 +2,8 @@
 // The host's browser runs the match; everyone else connects to it with a room code.
 import { Peer } from 'peerjs';
 
-const PREFIX = 'numbskull-room-v1-';
+const PREFIX = 'numbskull-room-v2-';
+export const PUBLIC_PREFIX = 'numbskull-pub-v2-';
 const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 
 // Optional self-hosted signalling server: ?signal=https://your-peer-server.example/path
@@ -43,14 +44,16 @@ const errText = (e) => {
 export class HostNet {
   constructor(h) { this.h = h; this.conns = new Map(); this.peer = null; this.code = null; this.tries = 0; }
 
-  start(code = makeRoomCode()) {
-    this.code = code;
+  // fullId: claim an exact peer id (public rooms) instead of a random room code
+  start(code = makeRoomCode(), fullId = null) {
+    this.code = code; this.fullId = fullId;
     let opened = false;
-    try { this.peer = new Peer(PREFIX + code, peerOptions()); }
+    try { this.peer = new Peer(fullId || PREFIX + code, peerOptions()); }
     catch (e) { this.h.onError?.(errText(e)); return; }
     const timeout = setTimeout(() => { if (!opened) { this.h.onError?.(errText({ type: 'network' })); this.close(); } }, 12000);
     this.peer.on('open', () => { opened = true; clearTimeout(timeout); this.h.onReady?.(code); });
     this.peer.on('error', (e) => {
+      if (e.type === 'unavailable-id' && this.fullId) { clearTimeout(timeout); opened = true; this.peer.destroy(); this.h.onTaken?.(); return; }
       if (e.type === 'unavailable-id' && this.tries++ < 4) { clearTimeout(timeout); this.peer.destroy(); this.start(); return; }
       if (e.type === 'peer-unavailable') return;
       clearTimeout(timeout);
@@ -74,19 +77,19 @@ export class HostNet {
 export class ClientNet {
   constructor(h) { this.h = h; this.peer = null; this.conn = null; }
 
-  start(code) {
+  start(code, fullId = null, timeoutMs = 15000) {
     let opened = false;
     try { this.peer = new Peer(peerOptions()); }
     catch (e) { this.h.onError?.(errText(e)); return; }
-    const timeout = setTimeout(() => { if (!opened) { this.h.onError?.(errText({ type: 'network' })); this.close(); } }, 15000);
+    const timeout = setTimeout(() => { if (!opened) { this.h.onError?.(errText({ type: 'network' }), this.peer && this.peer.open ? 'timeout' : 'network'); this.close(); } }, timeoutMs);
     this.peer.on('open', () => {
-      this.conn = this.peer.connect(PREFIX + code.toUpperCase(), { reliable: true, serialization: 'json' });
+      this.conn = this.peer.connect(fullId || PREFIX + code.toUpperCase(), { reliable: true, serialization: 'json' });
       this.conn.on('open', () => { opened = true; clearTimeout(timeout); this.h.onOpen?.(); });
       this.conn.on('data', (d) => this.h.onData?.(d));
       this.conn.on('close', () => this.h.onClose?.());
       this.conn.on('error', () => this.h.onClose?.());
     });
-    this.peer.on('error', (e) => { clearTimeout(timeout); this.h.onError?.(errText(e)); });
+    this.peer.on('error', (e) => { clearTimeout(timeout); opened = true; this.h.onError?.(errText(e), e.type); });
   }
 
   send(msg) { try { if (this.conn && this.conn.open) this.conn.send(msg); } catch { /* dropped */ } }

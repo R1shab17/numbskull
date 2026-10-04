@@ -135,6 +135,17 @@ export class Avatar {
     this.note.position.set(0, 0.43, -0.37);
     this.note.rotation.set(0.3, Math.PI, 0);
     this.neck.add(this.note);
+    // extra notes stacked underneath (Battle Royale lives); their edges peek out
+    this.under = [];
+    for (const [rz, col] of [[0.16, '#ff9ecb'], [-0.13, '#7ef0c8']]) {
+      const u = new THREE.Mesh(GEO.note, new THREE.MeshBasicMaterial({ color: col }));
+      u.position.set(0, 0.43, -0.356);
+      u.rotation.set(0.3, Math.PI, rz);
+      u.visible = false;
+      this.neck.add(u);
+      this.under.push(u);
+    }
+    this.notes = 1;
     for (const x of [-0.12, 0.12]) {
       const e = new THREE.Mesh(GEO.eye, MAT.black); e.position.set(x, 0.21, -0.318); this.neck.add(e);
       const gl = new THREE.Mesh(GEO.glint, MAT.white); gl.position.set(x + 0.02, 0.235, -0.365); this.neck.add(gl);
@@ -197,6 +208,52 @@ export class Avatar {
     this.noteTex.needsUpdate = true;
   }
   redrawNote() { const n = this.number; this.number = null; this.setNumber(n); }
+
+  setNotes(n) {
+    if (n === this.notes) return;
+    this.notes = n;
+    this.under.forEach((u, i) => { u.visible = i < n - 1; });
+  }
+
+  // spectators see everyone's name and number floating above their head
+  setSpecTag(text, color) {
+    if (!text) { if (this.specTag) this.specTag.visible = false; return; }
+    if (!this.specTag) {
+      const c = document.createElement('canvas'); c.width = 320; c.height = 72;
+      const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+      this.specTag = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false, transparent: true }));
+      this.specTag.renderOrder = 6;
+      this.specTag.position.y = 2.75;
+      this.root.add(this.specTag);
+    }
+    this.specTag.visible = true;
+    const key = text + color;
+    if (this._specKey === key) return;
+    this._specKey = key;
+    const c = this.specTag.material.map.image, g = c.getContext('2d');
+    g.clearRect(0, 0, c.width, c.height);
+    g.font = '700 30px "Atkinson Hyperlegible", system-ui, sans-serif';
+    const w = Math.min(c.width - 4, g.measureText(text).width + 30);
+    g.fillStyle = 'rgba(20,16,32,0.8)';
+    g.beginPath(); g.roundRect((c.width - w) / 2, 8, w, 54, 14); g.fill();
+    g.fillStyle = color || '#ffe45c'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(text, c.width / 2, 36);
+    this.specTag.material.map.needsUpdate = true;
+  }
+
+  setSpecScale(s) { if (this.specTag) this.specTag.scale.set(2.2 * s, 0.5 * s, 1); }
+
+  // a bright ring on the ground so players are easy to spot from the god view
+  setSpecRing(on, scale, color) {
+    if (!on) { if (this.ring) this.ring.visible = false; return; }
+    if (!this.ring) {
+      this.ring = new THREE.Mesh(new THREE.RingGeometry(0.55, 0.8, 28), new THREE.MeshBasicMaterial({ color: color || '#ffe45c', transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide }));
+      this.ring.rotation.x = -Math.PI / 2; this.ring.position.y = 0.06; this.ring.renderOrder = 4;
+      this.root.add(this.ring);
+    }
+    this.ring.visible = true;
+    this.ring.scale.setScalar(scale);
+  }
 
   setTeam(team) {
     this.team = team;

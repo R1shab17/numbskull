@@ -75,6 +75,32 @@ export class Renderer {
     this.pickupMeshes = game.pickups.map(pk => { const m = makePickupMesh(); m.position.set(pk.x, pk.y, pk.z); scene.add(m); return m; });
     for (const p of game.players.values()) this.ensureAvatar(p);
     this.attractT = 0;
+    this.zoneMesh = null;
+    if (game.br) this.buildZone(scene);
+  }
+
+  // Battle Royale storm wall: a tall striped cylinder plus a ring showing where it will close to
+  buildZone(scene) {
+    const mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: false,
+      uniforms: { t: { value: 0 }, col: { value: new THREE.Color('#ff4f8b') } },
+      vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+      fragmentShader: `uniform float t; uniform vec3 col; varying vec2 vUv;
+        void main(){
+          float stripe = step(0.5, fract(vUv.x * 160.0 + vUv.y * 6.0 - t * 0.6));
+          float fade = pow(1.0 - vUv.y, 1.6);
+          float a = (0.16 + 0.22 * stripe) * fade + 0.1 * smoothstep(0.03, 0.0, vUv.y);
+          gl_FragColor = vec4(col, a);
+        }`,
+    });
+    const wall = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 36, 96, 1, true), mat);
+    wall.position.y = 18; wall.renderOrder = 3;
+    const g = new THREE.Group();
+    g.add(wall);
+    const next = new THREE.Mesh(new THREE.RingGeometry(0.992, 1, 128), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.75, side: THREE.DoubleSide, depthWrite: false }));
+    next.rotation.x = -Math.PI / 2;
+    scene.add(g, next);
+    this.zoneMesh = { g, wall, next, mat };
   }
 
   unload() {
@@ -160,9 +186,17 @@ export class Renderer {
       const a = this.ensureAvatar(p);
       if (a.team !== p.team) a.setTeam(p.team);
       a.setNumber(p.num);
+      a.setNotes(p.notes || 1);
       const isMe = p.id === g.localId && view.mode === 'fp';
       a.setVisible(p.alive && !isMe);
       if (!p.alive) continue;
+      const spec = view.mode === 'spec-god' || view.mode === 'spec-follow';
+      const camD = this.camera.position.distanceTo(a.root.position);
+      if (spec && !(view.mode === 'spec-follow' && view.spec && view.spec.target === p.id)) {
+        a.setSpecTag(`${p.name} · ${p.num}`, p.team ? TEAM_COLOR[p.team] : '#ffe45c');
+        a.setSpecScale(Math.max(0.9, camD * 0.062));
+      } else a.setSpecTag(null);
+      a.setSpecRing(view.mode === 'spec-god', Math.max(1, camD * 0.03), p.team ? TEAM_COLOR[p.team] : '#ffe45c');
       a.update(dt, { x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch, crouch: p.crouchK, speed: p.speed, onGround: p.onGround, zoom: p.zoom, protect: p.protect }, time);
       a.setCarrying(p.carrying ? TEAM_COLOR[p.carrying] : null);
       a.tag.visible = !!(g.teams && local && p.team === local.team && p.id !== g.localId);
@@ -183,6 +217,18 @@ export class Renderer {
       m.position.y = pk.y + Math.sin(time * 2.4 + i) * 0.12;
       m.userData.box.rotation.y = time * 1.5 + i;
     });
+    if (this.zoneMesh && g.zone) {
+      const Z = g.zone, M = this.zoneMesh;
+      M.g.position.set(Z.x, 0, Z.z);
+      const r = Math.max(0.05, Z.r);
+      M.g.scale.set(r, 1, r);
+      M.mat.uniforms.t.value = time;
+      M.g.visible = g.phase !== 'countdown' || true;
+      M.next.visible = Z.state !== 'final' && Z.nr < Z.r - 0.5;
+      M.next.position.set(Z.nx, 0.06, Z.nz);
+      const nr = Math.max(0.05, Z.nr);
+      M.next.scale.set(nr, nr, 1);
+    }
     this.effects.syncGrenades(g.grenades);
     this.effects.syncSmokes(g.smokes, dt);
     this.effects.syncDistracts(g.distracts, time);
@@ -216,6 +262,35 @@ export class Renderer {
       cam.quaternion.slerp(q, k);
       const target = killer && Math.hypot(killer.x - dp[0], killer.z - dp[2]) > 15 ? 30 : 60;
       cam.fov += (target - cam.fov) * k; cam.updateProjectionMatrix();
+    } else if (view.mode === 'spec-follow' && view.spec && g.players.get(view.spec.target)) {
+      // over-the-shoulder chase cam on the player being spectated
+      const t = g.players.get(view.spec.target);
+      const yaw = t.yaw + (view.spec.orbit || 0);
+      const head = new THREE.Vector3(t.x, t.y + eyeHeight(t) + 0.15, t.z);
+      const dist = 4.2, up = 1.25 + (view.spec.tilt || 0);
+      const want = new THREE.Vector3(t.x + Math.sin(yaw) * dist, head.y + up, t.z + Math.cos(yaw) * dist);
+      const dir = want.clone().sub(head); const L = dir.length(); dir.normalize();
+      const hit = g.world.raycast(head.x, head.y, head.z, dir.x, dir.y, dir.z, L);
+      if (hit) want.copy(head).addScaledVector(dir, Math.max(0.6, hit.t - 0.6));
+      const k = Math.min(1, dt * 8);
+      if (this._lastSpecTarget !== t.id) { cam.position.copy(want); this._lastSpecTarget = t.id; }
+      else cam.position.lerp(want, k);
+      const look = new THREE.Vector3(t.x - Math.sin(yaw) * 6, head.y - 0.2, t.z - Math.cos(yaw) * 6);
+      const m = new THREE.Matrix4().lookAt(cam.position, look, new THREE.Vector3(0, 1, 0));
+      cam.quaternion.setFromRotationMatrix(m);
+      if (Math.abs(cam.fov - 70) > 0.01) { cam.fov = 70; cam.updateProjectionMatrix(); }
+    } else if (view.mode === 'spec-god' && view.spec) {
+      // god view: looking down on the whole arena
+      const S = view.spec;
+      const back = S.h * 0.42;
+      const want = new THREE.Vector3(S.x + Math.sin(S.yaw) * back, S.h, S.z + Math.cos(S.yaw) * back);
+      const k = Math.min(1, dt * 7);
+      cam.position.lerp(want, k);
+      const m = new THREE.Matrix4().lookAt(cam.position, new THREE.Vector3(S.x, 0, S.z), new THREE.Vector3(0, 1, 0));
+      const q = new THREE.Quaternion().setFromRotationMatrix(m);
+      cam.quaternion.slerp(q, k);
+      if (Math.abs(cam.fov - 55) > 0.01) { cam.fov = 55; cam.updateProjectionMatrix(); }
+      this._lastSpecTarget = null;
     } else {
       // attract / spectate: slow orbit
       this.attractT += dt;
