@@ -1,0 +1,90 @@
+<title>Numbskull</title>
+<style>/* BUILD:CSS */</style>
+
+<canvas id="gl" aria-label="Game view"></canvas>
+
+<!-- ============================== HUD ============================== -->
+<div id="hud" hidden>
+  <div id="flash"></div>
+  <div id="blindtext" hidden>FLASHED</div>
+  <div id="bino" hidden><div class="bino-ring"></div><div class="bino-ring r2"></div><div class="bino-ticks"></div></div>
+  <div id="watch" aria-hidden="true"></div>
+
+  <div id="topbar">
+    <div id="score-l" class="scorechip"></div>
+    <div id="timer" class="mono">5:00</div>
+    <div id="score-r" class="scorechip"></div>
+  </div>
+  <div id="ctf-hud" hidden></div>
+  <div id="feed" aria-live="polite"></div>
+  <canvas id="minimap" width="200" height="160"></canvas>
+
+  <div id="crosshair"><i></i></div>
+  <div id="markers"></div>
+  <div id="bigmsg"></div>
+  <div id="centermsg"></div>
+
+  <div id="mynote" title="This is the number on your forehead. Don't let people read it.">
+    <span class="lbl">On your head</span>
+    <b id="mynum">----</b>
+    <span id="eye" class="eye" hidden><svg width="14" height="10" viewBox="0 0 14 10" aria-hidden="true" style="vertical-align:-1px"><path d="M1 5c1.6-2.7 3.6-4 6-4s4.4 1.3 6 4c-1.6 2.7-3.6 4-6 4S2.6 7.7 1 5z" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="5" r="1.8" fill="currentColor"/></svg> Someone's reading you</span>
+  </div>
+
+  <div id="typebar">
+    <div id="slots"></div>
+    <div id="jambar"><i></i></div>
+    <div id="typehint">Type the number on someone's forehead</div>
+  </div>
+
+  <div id="gadgets"></div>
+
+  <div id="photo" hidden><canvas id="photocv"></canvas><span>SNAP · <b id="phototime">4</b>s</span></div>
+
+  <div id="death" hidden>
+    <div class="death-card">
+      <span class="lbl">You got read</span>
+      <div id="deathby"></div>
+      <div id="deathcode" class="marker"></div>
+      <div id="respawn">Back in <b>3</b></div>
+    </div>
+  </div>
+
+  <div id="chat">
+    <div id="chatlog"></div>
+    <form id="chatform" hidden><input id="chatin" maxlength="120" autocomplete="off" placeholder="Say something…"></form>
+  </div>
+
+  <div id="scoreboard" hidden></div>
+  <div id="clicktoplay" hidden><button class="btn big" id="ctpBtn">Click to play</button><p>Mouse to look · WASD to move · type numbers to read people out</p></div>
+  <div id="fps" hidden></div>
+
+  <div id="touch" hidden>
+    <div class="tzone move" data-touch="move"><div class="stick"><div class="stick-knob"></div></div></div>
+    <div class="tzone look" data-touch="look"></div>
+    <div class="tpad">
+      <button data-key="1">1</button><button data-key="2">2</button><button data-key="3">3</button>
+      <button data-key="4">4</button><button data-key="5">5</button><button data-key="6">6</button>
+      <button data-key="7">7</button><button data-key="8">8</button><button data-key="9">9</button>
+      <button data-key="back">⌫</button><button data-key="0">0</button><button data-key="zoom" style="font-family:var(--f-body);font-size:.75rem;font-weight:700">ZOOM</button>
+    </div>
+    <div class="tbtns">
+      <button data-key="throw">Throw</button><button data-key="cycle">Swap</button>
+      <button data-key="photo">Snap</button><button data-key="jump">Jump</button><button data-key="crouch">Duck</button>
+    </div>
+    <button class="tpause" data-key="pause">II</button>
+    <button class="tscore" data-key="score">Scores</button>
+  </div>
+</div>
+
+<!-- ============================== MENUS ============================== -->
+<div id="menu">
+  <div id="menu-scrim"></div>
+  <main id="screens"></main>
+  <footer id="menu-foot">
+    <span>Numbskull is free and open source.</span>
+    <span id="ver"></span>
+  </footer>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="rotate"><b>Turn your phone sideways</b><span>Numbskull plays in landscape.</span></div>
+<!-- BUILD:JS -->

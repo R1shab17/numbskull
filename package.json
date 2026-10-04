@@ -1,0 +1,23 @@
+{
+  "name": "numbskull",
+  "version": "1.0.0",
+  "description": "A free, open-source browser FPS where you take people out by reading the number on their forehead and typing it.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --serve",
+    "sim": "node tools/sim.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "peerjs": "1.5.4",
+    "three": "0.169.0"
+  },
+  "devDependencies": {
+    "@fontsource/atkinson-hyperlegible": "^5.3.0",
+    "@fontsource/dela-gothic-one": "^5.3.0",
+    "@fontsource/permanent-marker": "^5.3.0",
+    "esbuild": "0.24.0"
+  }
+}
