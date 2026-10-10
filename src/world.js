@@ -3,6 +3,9 @@
 import { CFG } from './config.js';
 
 const CELL = 4; // broadphase cell size (m)
+// neighbour offsets for the nav grid: 4 straight [dx, dz], then 4 diagonals [dx, dz, straightA, straightB]
+const DIRS = [1, 0, -1, 0, 0, 1, 0, -1];
+const DIAG = [1, 1, 0, 2, 1, -1, 0, 3, -1, 1, 1, 2, -1, -1, 1, 3];
 
 export class World {
   constructor(map) {
@@ -177,24 +180,28 @@ export class World {
   raycast(ax, ay, az, dx, dy, dz, maxT) {
     const bx = ax + dx * maxT, bz = az + dz * maxT;
     const list = this.query(Math.min(ax, bx), Math.min(az, bz), Math.max(ax, bx), Math.max(az, bz), this._tmpE || (this._tmpE = []));
-    let best = null;
-    const test = (minX, minY, minZ, maxX, maxY, maxZ) => {
-      let tmin = -Infinity, tmax = Infinity, n = 0;
-      const axes = [[ax, dx, minX, maxX, 0], [ay, dy, minY, maxY, 1], [az, dz, minZ, maxZ, 2]];
-      for (const [o, d, lo, hi, k] of axes) {
-        if (Math.abs(d) < 1e-9) { if (o < lo || o > hi) return; continue; }
+    let hit = false, bestT = 0, bestN = 0;
+    for (let q = 0; q < list.length; q++) {
+      const b = list[q];
+      let tmin = -Infinity, tmax = Infinity, n = 0, miss = false;
+      // slab test on x, y, z in turn; n records which face was entered (+-1, +-2, +-3)
+      for (let k = 0; k < 3; k++) {
+        const o = k === 0 ? ax : k === 1 ? ay : az;
+        const d = k === 0 ? dx : k === 1 ? dy : dz;
+        const lo = k === 0 ? b.minX : k === 1 ? b.minY : b.minZ;
+        const hi = k === 0 ? b.maxX : k === 1 ? b.maxY : b.maxZ;
+        if (Math.abs(d) < 1e-9) { if (o < lo || o > hi) { miss = true; break; } continue; }
         let t1 = (lo - o) / d, t2 = (hi - o) / d, sgn = -1;
         if (t1 > t2) { const tt = t1; t1 = t2; t2 = tt; sgn = 1; }
         if (t1 > tmin) { tmin = t1; n = (k + 1) * sgn; }
         if (t2 < tmax) tmax = t2;
-        if (tmin > tmax) return;
+        if (tmin > tmax) { miss = true; break; }
       }
-      if (tmin >= 0 && tmin <= maxT && (!best || tmin < best.t)) {
-        const k = Math.abs(n) - 1, s = Math.sign(n);
-        best = { t: tmin, nx: k === 0 ? s : 0, ny: k === 1 ? s : 0, nz: k === 2 ? s : 0 };
-      }
-    };
-    for (const b of list) test(b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ);
+      if (miss) continue;
+      if (tmin >= 0 && tmin <= maxT && (!hit || tmin < bestT)) { hit = true; bestT = tmin; bestN = n; }
+    }
+    let best = null;
+    if (hit) { const k = Math.abs(bestN) - 1, s = Math.sign(bestN); best = { t: bestT, nx: k === 0 ? s : 0, ny: k === 1 ? s : 0, nz: k === 2 ? s : 0 }; }
     // ground plane
     if (dy < 0) { const t = -ay / dy; if (t >= 0 && t <= maxT && (!best || t < best.t)) best = { t, nx: 0, ny: 1, nz: 0 }; }
     return best;
@@ -260,21 +267,20 @@ export class World {
     return c;
   }
 
+  // Calls fn(j, cost) for every cell you can step to from cell i (no allocations: runs per A* node).
   forNeighbors(i, fn) {
     const nx = this.nx, ix = i % nx, iz = (i - ix) / nx;
-    const ok = [false, false, false, false];
-    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    let ok = 0;
     for (let k = 0; k < 4; k++) {
-      const jx = ix + dirs[k][0], jz = iz + dirs[k][1];
+      const jx = ix + DIRS[k * 2], jz = iz + DIRS[k * 2 + 1];
       if (jx < 0 || jz < 0 || jx >= nx || jz >= this.nz) continue;
       const j = jx + jz * nx;
       const c = this.edgeCost(i, j);
-      if (c > 0) { ok[k] = true; fn(j, c); }
+      if (c > 0) { ok |= 1 << k; fn(j, c); }
     }
-    const diag = [[1, 1, 0, 2], [1, -1, 0, 3], [-1, 1, 1, 2], [-1, -1, 1, 3]];
-    for (const [dx, dz, a, b] of diag) {
-      if (!ok[a] || !ok[b]) continue;
-      const j = (ix + dx) + (iz + dz) * nx;
+    for (let d = 0; d < 16; d += 4) {
+      if (!(ok & (1 << DIAG[d + 2])) || !(ok & (1 << DIAG[d + 3]))) continue;
+      const j = (ix + DIAG[d]) + (iz + DIAG[d + 1]) * nx;
       const dh = this.navH[j] - this.navH[i];
       if (Math.abs(dh) > 0.6) continue;
       const c = this.edgeCost(i, j);
@@ -297,20 +303,21 @@ export class World {
     const push = (i) => { let k = ++hn; heap[k] = i; while (k > 1 && f[heap[k >> 1]] > f[heap[k]]) { const p = k >> 1, tmp = heap[p]; heap[p] = heap[k]; heap[k] = tmp; k = p; } };
     const pop = () => { const top = heap[1]; heap[1] = heap[hn--]; let k = 1; for (;;) { const l = k * 2, r = l + 1; let m = k; if (l <= hn && f[heap[l]] < f[heap[m]]) m = l; if (r <= hn && f[heap[r]] < f[heap[m]]) m = r; if (m === k) break; const tmp = heap[m]; heap[m] = heap[k]; heap[k] = tmp; k = m; } return top; };
     g[s] = 0; f[s] = H(s); par[s] = -1; open[s] = st; push(s);
-    let iter = 0, found = false;
+    let iter = 0, found = false, cur = 0, gi = 0;
+    const relax = (j, c) => {
+      if (closed[j] === st) return;
+      const ng = gi + c;
+      if (open[j] !== st || ng < g[j]) {
+        open[j] = st; g[j] = ng; f[j] = ng + H(j) * 1.05; par[j] = cur; push(j);
+      }
+    };
     while (hn > 0 && iter++ < maxIter) {
       const i = pop();
       if (closed[i] === st) continue;
       closed[i] = st;
       if (i === t) { found = true; break; }
-      const gi = g[i];
-      this.forNeighbors(i, (j, c) => {
-        if (closed[j] === st) return;
-        const ng = gi + c;
-        if (open[j] !== st || ng < g[j]) {
-          open[j] = st; g[j] = ng; f[j] = ng + H(j) * 1.05; par[j] = i; push(j);
-        }
-      });
+      cur = i; gi = g[i];
+      this.forNeighbors(i, relax);
     }
     if (!found) return null;
     const path = [];

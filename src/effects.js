@@ -60,8 +60,31 @@ export class Effects {
     this.confMesh.instanceColor.needsUpdate = true;
   }
 
+  // Material recipes, shared by the effects and by warmUp() below.
+  ringMat(color) { return new THREE.MeshBasicMaterial({ color, transparent: true, side: THREE.DoubleSide, depthWrite: false }); }
+  glowMat(color) { return new THREE.SpriteMaterial({ map: this.glowTex, color: color || '#ffffff', transparent: true, depthWrite: false }); }
+  flashMat() { return new THREE.SpriteMaterial({ map: this.glowTex, color: '#ffffff', transparent: true, depthWrite: false, depthTest: false, fog: false }); }
+  puffMat(color) { return new THREE.SpriteMaterial({ map: this.smokeTex, color, transparent: true, depthWrite: false, opacity: 0 }); }
+  holoMat(map) { return new THREE.MeshBasicMaterial({ map, transparent: true, opacity: 0.88, depthWrite: false }); }
+  beamMat() { return new THREE.MeshBasicMaterial({ color: '#ff7ad9', transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false }); }
+
+  // One hidden copy of every effect, kept for as long as the map is loaded. Compiling these
+  // up front (and never disposing them mid-match) means the first flashbang, smoke or read
+  // doesn't stall the frame on a shader compile, and later ones never recompile.
+  warmUp() {
+    const g = new THREE.Group();
+    g.visible = false;
+    const plane = new THREE.PlaneGeometry(1, 1);
+    g.add(new THREE.Mesh(plane, this.ringMat('#ffffff')));
+    g.add(new THREE.Sprite(this.glowMat()), new THREE.Sprite(this.flashMat()), new THREE.Sprite(this.puffMat('#ffffff')));
+    g.add(new THREE.Mesh(plane, this.holoMat(this.glowTex)), new THREE.Mesh(plane, this.beamMat()));
+    for (const t of ['flash', 'smoke', 'distract']) g.add(this.grenadeMesh(t));
+    this.scene.add(g);
+    return g;
+  }
+
   ring(x, y, z, color = '#ffffff', size = 2.5, life = 0.45) {
-    const m = new THREE.Mesh(new THREE.RingGeometry(0.6, 0.8, 32), new THREE.MeshBasicMaterial({ color, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+    const m = new THREE.Mesh(new THREE.RingGeometry(0.6, 0.8, 32), this.ringMat(color));
     m.position.set(x, y, z);
     m.rotation.x = -Math.PI / 2;
     this.scene.add(m);
@@ -70,14 +93,14 @@ export class Effects {
 
   poof(x, y, z, color) {
     this.confetti(x, y, z, 80);
-    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: color || '#ffffff', transparent: true, depthWrite: false }));
+    const s = new THREE.Sprite(this.glowMat(color));
     s.position.set(x, y, z); s.scale.setScalar(0.5);
     this.scene.add(s);
     this.bursts.push({ s, t: 0, life: 0.45, from: 0.5, to: 3.2 });
   }
 
   flashBurst(x, y, z) {
-    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: '#ffffff', transparent: true, depthWrite: false, depthTest: false, fog: false }));
+    const s = new THREE.Sprite(this.flashMat());
     s.position.set(x, y, z); s.scale.setScalar(1);
     this.scene.add(s);
     this.bursts.push({ s, t: 0, life: 0.6, from: 2, to: 16 });
@@ -131,7 +154,7 @@ export class Effects {
         v = { g: new THREE.Group(), puffs: [] };
         const n = 34;
         for (let i = 0; i < n; i++) {
-          const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.smokeTex, color: new THREE.Color().setHSL(0.6, 0.08, 0.82 + Math.random() * 0.12), transparent: true, depthWrite: false, opacity: 0 }));
+          const sp = new THREE.Sprite(this.puffMat(new THREE.Color().setHSL(0.6, 0.08, 0.82 + Math.random() * 0.12)));
           const dir = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.3) * 0.7, Math.random() - 0.5).normalize().multiplyScalar(Math.pow(Math.random(), 0.6));
           sp.userData = { dir, size: 2.6 + Math.random() * 2.4, spin: (Math.random() - 0.5) * 0.4 };
           v.g.add(sp); v.puffs.push(sp);
@@ -164,14 +187,14 @@ export class Effects {
         const g = new THREE.Group();
         // two single-sided planes back to back, so the fake number reads correctly from both sides
         const holo = new THREE.Group();
-        const hm = new THREE.MeshBasicMaterial({ map: noteTexture(d.fake || '????', { paper: '#ff7ad9' }), transparent: true, opacity: 0.88, depthWrite: false });
+        const hm = this.holoMat(noteTexture(d.fake || '????', { paper: '#ff7ad9' }));
         const front = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.0), hm);
         const back = front.clone(); back.rotation.y = Math.PI;
         holo.add(front, back);
         holo.position.y = 2.2;
-        const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.4, 2.0, 12, 1, true), new THREE.MeshBasicMaterial({ color: '#ff7ad9', transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false }));
+        const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.4, 2.0, 12, 1, true), this.beamMat());
         beam.position.y = 1.0;
-        const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: '#ff7ad9', transparent: true, depthWrite: false }));
+        const glow = new THREE.Sprite(this.glowMat('#ff7ad9'));
         glow.scale.setScalar(2.2); glow.position.y = 0.2;
         g.add(holo, beam, glow);
         g.position.set(d.x, d.y, d.z);

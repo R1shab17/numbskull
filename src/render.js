@@ -1,10 +1,16 @@
 // Rendering: three.js renderer, cameras, avatars, flags, pickups, first-person hands.
 import * as THREE from 'three';
-import { buildScene, makeFlagMesh, waveFlag, makePickupMesh, noteTexture } from './scene.js';
+import { buildScene, makeFlagMesh, waveFlag, makePickupInstances, noteTexture } from './scene.js';
 import { Avatar } from './avatar.js';
 import { Effects } from './effects.js';
 import { CFG, TEAM_COLOR } from './config.js';
 import { eyeHeight } from './game.js';
+
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3();
+const _zero = new THREE.Matrix4().makeScale(0, 0, 0), _up = new THREE.Vector3(0, 1, 0), _xAxis = new THREE.Vector3(1, 0, 0);
+// camera scratch objects, reused every frame instead of allocating new ones
+const _want = new THREE.Vector3(), _look = new THREE.Vector3(), _head = new THREE.Vector3(), _dir = new THREE.Vector3();
+const _cm = new THREE.Matrix4(), _cq = new THREE.Quaternion(), _pv = new THREE.Vector3();
 
 export class Renderer {
   constructor(canvas) {
@@ -72,11 +78,17 @@ export class Renderer {
         this.flagMeshes[t] = m;
       }
     }
-    this.pickupMeshes = game.pickups.map(pk => { const m = makePickupMesh(); m.position.set(pk.x, pk.y, pk.z); scene.add(m); return m; });
+    this.pickups = makePickupInstances(game.pickups.length);
+    scene.add(this.pickups.box, this.pickups.ring);
     for (const p of game.players.values()) this.ensureAvatar(p);
     this.attractT = 0;
     this.zoneMesh = null;
     if (game.br) this.buildZone(scene);
+    // Compile every shader this match can need now, while it's loading, rather than
+    // mid-fight the first time an effect shows up. Nothing here is drawn.
+    this.effects.warmUp();
+    this.r.compile(scene, this.camera);
+    this.r.compile(this.vmScene, this.vmCam);
   }
 
   // Battle Royale storm wall: a tall striped cylinder plus a ring showing where it will close to
@@ -210,13 +222,21 @@ export class Renderer {
       m.position.set(f.x, f.y, f.z);
       waveFlag(m, time + +t);
     }
-    // pickups
-    g.pickups.forEach((pk, i) => {
-      const m = this.pickupMeshes[i];
-      m.visible = pk.active;
-      m.position.y = pk.y + Math.sin(time * 2.4 + i) * 0.12;
-      m.userData.box.rotation.y = time * 1.5 + i;
-    });
+    // pickups (instanced): bob and spin, hidden ones collapse to nothing
+    {
+      const B = this.pickups.box, Rg = this.pickups.ring, m = _m, q = _q, v = _v, sc = _s;
+      g.pickups.forEach((pk, i) => {
+        if (!pk.active) { B.setMatrixAt(i, _zero); Rg.setMatrixAt(i, _zero); return; }
+        const y = pk.y + Math.sin(time * 2.4 + i) * 0.12;
+        q.setFromAxisAngle(_up, time * 1.5 + i);
+        m.compose(v.set(pk.x, y, pk.z), q, sc.set(1, 1, 1));
+        B.setMatrixAt(i, m);
+        q.setFromAxisAngle(_xAxis, Math.PI / 2);
+        m.compose(v.set(pk.x, y - 0.45, pk.z), q, sc);
+        Rg.setMatrixAt(i, m);
+      });
+      B.instanceMatrix.needsUpdate = true; Rg.instanceMatrix.needsUpdate = true;
+    }
     if (this.zoneMesh && g.zone) {
       const Z = g.zone, M = this.zoneMesh;
       M.g.position.set(Z.x, 0, Z.z);
@@ -254,41 +274,35 @@ export class Renderer {
       let tx = dp[0], ty = dp[1] + 1.4, tz = dp[2];
       if (killer && killer.alive) { tx = killer.x; ty = killer.y + 1.7; tz = killer.z; }
       const k = Math.min(1, dt * 3);
-      const want = new THREE.Vector3(dp[0], dp[1] + 3.2, dp[2]);
-      cam.position.lerp(want, k);
-      const look = new THREE.Vector3(tx, ty, tz);
-      const m = new THREE.Matrix4().lookAt(cam.position, look, new THREE.Vector3(0, 1, 0));
-      const q = new THREE.Quaternion().setFromRotationMatrix(m);
-      cam.quaternion.slerp(q, k);
+      cam.position.lerp(_want.set(dp[0], dp[1] + 3.2, dp[2]), k);
+      _cm.lookAt(cam.position, _look.set(tx, ty, tz), _up);
+      cam.quaternion.slerp(_cq.setFromRotationMatrix(_cm), k);
       const target = killer && Math.hypot(killer.x - dp[0], killer.z - dp[2]) > 15 ? 30 : 60;
       cam.fov += (target - cam.fov) * k; cam.updateProjectionMatrix();
     } else if (view.mode === 'spec-follow' && view.spec && g.players.get(view.spec.target)) {
       // over-the-shoulder chase cam on the player being spectated
       const t = g.players.get(view.spec.target);
       const yaw = t.yaw + (view.spec.orbit || 0);
-      const head = new THREE.Vector3(t.x, t.y + eyeHeight(t) + 0.15, t.z);
+      const head = _head.set(t.x, t.y + eyeHeight(t) + 0.15, t.z);
       const dist = 4.2, up = 1.25 + (view.spec.tilt || 0);
-      const want = new THREE.Vector3(t.x + Math.sin(yaw) * dist, head.y + up, t.z + Math.cos(yaw) * dist);
-      const dir = want.clone().sub(head); const L = dir.length(); dir.normalize();
+      const want = _want.set(t.x + Math.sin(yaw) * dist, head.y + up, t.z + Math.cos(yaw) * dist);
+      const dir = _dir.copy(want).sub(head); const L = dir.length(); dir.normalize();
       const hit = g.world.raycast(head.x, head.y, head.z, dir.x, dir.y, dir.z, L);
       if (hit) want.copy(head).addScaledVector(dir, Math.max(0.6, hit.t - 0.6));
       const k = Math.min(1, dt * 8);
       if (this._lastSpecTarget !== t.id) { cam.position.copy(want); this._lastSpecTarget = t.id; }
       else cam.position.lerp(want, k);
-      const look = new THREE.Vector3(t.x - Math.sin(yaw) * 6, head.y - 0.2, t.z - Math.cos(yaw) * 6);
-      const m = new THREE.Matrix4().lookAt(cam.position, look, new THREE.Vector3(0, 1, 0));
-      cam.quaternion.setFromRotationMatrix(m);
+      _cm.lookAt(cam.position, _look.set(t.x - Math.sin(yaw) * 6, head.y - 0.2, t.z - Math.cos(yaw) * 6), _up);
+      cam.quaternion.setFromRotationMatrix(_cm);
       if (Math.abs(cam.fov - 70) > 0.01) { cam.fov = 70; cam.updateProjectionMatrix(); }
     } else if (view.mode === 'spec-god' && view.spec) {
       // god view: looking down on the whole arena
       const S = view.spec;
       const back = S.h * 0.42;
-      const want = new THREE.Vector3(S.x + Math.sin(S.yaw) * back, S.h, S.z + Math.cos(S.yaw) * back);
       const k = Math.min(1, dt * 7);
-      cam.position.lerp(want, k);
-      const m = new THREE.Matrix4().lookAt(cam.position, new THREE.Vector3(S.x, 0, S.z), new THREE.Vector3(0, 1, 0));
-      const q = new THREE.Quaternion().setFromRotationMatrix(m);
-      cam.quaternion.slerp(q, k);
+      cam.position.lerp(_want.set(S.x + Math.sin(S.yaw) * back, S.h, S.z + Math.cos(S.yaw) * back), k);
+      _cm.lookAt(cam.position, _look.set(S.x, 0, S.z), _up);
+      cam.quaternion.slerp(_cq.setFromRotationMatrix(_cm), k);
       if (Math.abs(cam.fov - 55) > 0.01) { cam.fov = 55; cam.updateProjectionMatrix(); }
       this._lastSpecTarget = null;
     } else {
@@ -296,8 +310,8 @@ export class Renderer {
       this.attractT += dt;
       const R = Math.max(g.map.width, g.map.depth) * 0.42, a = this.attractT * 0.05 + 0.6;
       cam.position.set(Math.cos(a) * R, 17 + Math.sin(this.attractT * 0.1) * 3, Math.sin(a) * R * 0.85);
-      const m = new THREE.Matrix4().lookAt(cam.position, new THREE.Vector3(0, 1.5, 0), new THREE.Vector3(0, 1, 0));
-      cam.quaternion.setFromRotationMatrix(m);
+      _cm.lookAt(cam.position, _look.set(0, 1.5, 0), _up);
+      cam.quaternion.setFromRotationMatrix(_cm);
       if (Math.abs(cam.fov - 55) > 0.01) { cam.fov = 55; cam.updateProjectionMatrix(); }
     }
 
@@ -336,7 +350,7 @@ export class Renderer {
   // project a world point to screen pixels (for HUD markers); returns null if behind
   project(x, y, z) {
     this.camera.updateMatrixWorld();
-    const v = new THREE.Vector3(x, y, z).project(this.camera);
+    const v = _pv.set(x, y, z).project(this.camera);
     if (v.z > 1) return null;
     return { x: (v.x * 0.5 + 0.5) * innerWidth, y: (-v.y * 0.5 + 0.5) * innerHeight, behind: false };
   }

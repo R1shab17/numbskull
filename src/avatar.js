@@ -1,5 +1,6 @@
 // The cute little characters with a sticky note on their forehead.
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { noteTexture, drawNote, makeFlagMesh } from './scene.js';
 import { TEAM_COLOR } from './config.js';
 
@@ -35,6 +36,65 @@ const MAT = {
 };
 const mat = (color) => new THREE.MeshToonMaterial({ color, gradientMap: toon });
 
+// Each character is drawn as a handful of merged meshes instead of ~25 separate ones.
+// Colours move into vertex colours (white material x vertex colour = the same result),
+// so every character shares the same few materials.
+const SHARED = {
+  // body: one skinned mesh for every opaque toon part; the joints stay the same objects
+  body: (() => {
+    const m = new THREE.MeshToonMaterial({ color: '#ffffff', gradientMap: toon, vertexColors: true });
+    // Transform normals with the inverse transpose of the bone matrix, exactly like a normal
+    // Mesh does, so shading stays identical even while the legs are squashed by crouching.
+    m.onBeforeCompile = (sh) => {
+      sh.vertexShader = sh.vertexShader.replace('#include <skinnormal_vertex>', `
+#ifdef USE_SKINNING
+  mat4 skinMatrix = mat4( 0.0 );
+  skinMatrix += skinWeight.x * boneMatX;
+  skinMatrix += skinWeight.y * boneMatY;
+  skinMatrix += skinWeight.z * boneMatZ;
+  skinMatrix += skinWeight.w * boneMatW;
+  skinMatrix = bindMatrixInverse * skinMatrix * bindMatrix;
+  objectNormal = inverse( transpose( mat3( skinMatrix ) ) ) * objectNormal;
+#endif`);
+    };
+    m.customProgramCacheKey = () => 'numbskull-skin-normals';
+    return m;
+  })(),
+  toon: new THREE.MeshToonMaterial({ color: '#ffffff', gradientMap: toon, vertexColors: true }),
+  basic: new THREE.MeshBasicMaterial({ color: '#ffffff', vertexColors: true }),
+};
+const _m4 = new THREE.Matrix4();
+
+// Bake a list of { mesh, matrix, color, bone } into one geometry with colour (and skin) attributes.
+function bakeParts(parts, skinned) {
+  const geos = [];
+  const ranges = [];
+  let at = 0;
+  for (const p of parts) {
+    let g = p.mesh.geometry.clone();
+    if (!g.index) g = g; // all our primitives are indexed
+    g.applyMatrix4(p.matrix);
+    for (const k of Object.keys(g.attributes)) if (k !== 'position' && k !== 'normal') g.deleteAttribute(k);
+    const n = g.attributes.position.count;
+    const col = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { col[i * 3] = p.color.r; col[i * 3 + 1] = p.color.g; col[i * 3 + 2] = p.color.b; }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    if (skinned) {
+      const si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
+      for (let i = 0; i < n; i++) { si[i * 4] = p.bone; sw[i * 4] = 1; }
+      g.setAttribute('skinIndex', new THREE.BufferAttribute(si, 4));
+      g.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4));
+    }
+    ranges.push({ start: at, count: n, role: p.role, index: g.index.count });
+    at += n;
+    geos.push(g);
+  }
+  const merged = mergeGeometries(geos, false);
+  geos.forEach(g => g.dispose());
+  merged.userData.ranges = ranges;
+  return merged;
+}
+
 function hatMesh(type) {
   const g = new THREE.Group();
   const m = (c) => mat(c);
@@ -69,6 +129,7 @@ function hatMesh(type) {
     const prop = new THREE.Group();
     for (const [c, r] of [['#ff5c5c', 0], ['#4dabf7', Math.PI]]) { const b = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.01, 0.06), m(c)); b.position.x = 0.14; const p = new THREE.Group(); p.rotation.y = r; p.add(b); prop.add(p); }
     prop.position.y = 0.45;
+    prop.userData.dynamic = true;
     g.add(dome, stick, prop); g.position.y = 0.16;
     g.userData.spin = prop;
   } else if (type === 'crown') {
@@ -111,12 +172,12 @@ export class Avatar {
     this.mSkin = mat(skin);
     this.mPants = mat(this.team === 1 ? '#a82838' : this.team === 2 ? '#24459a' : '#3b3f58');
 
-    this.legs = new THREE.Group(); this.legs.position.y = 0.62;
+    this.legs = new THREE.Bone(); this.legs.position.y = 0.62;
     this.legL = this.limb(GEO.leg, this.mPants, -0.14, -0.27, true);
     this.legR = this.limb(GEO.leg, this.mPants, 0.14, -0.27, true);
     this.legs.add(this.legL, this.legR);
 
-    this.upper = new THREE.Group();
+    this.upper = new THREE.Bone();
     const torso = new THREE.Mesh(GEO.torso, this.mShirt);
     torso.position.y = 0.98; torso.castShadow = true;
     this.torso = torso;
@@ -125,7 +186,7 @@ export class Avatar {
     this.upper.add(torso, this.armL, this.armR);
 
     // head: pivots at the neck so pitch tilts the forehead note
-    this.neck = new THREE.Group(); this.neck.position.y = 1.38;
+    this.neck = new THREE.Bone(); this.neck.position.y = 1.38;
     const head = new THREE.Mesh(GEO.head, this.mSkin);
     head.position.y = 0.32; head.castShadow = true;
     this.head = head;
@@ -163,11 +224,13 @@ export class Avatar {
     this.bino = new THREE.Group();
     for (const x of [-0.07, 0.07]) { const t = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.16, 10), MAT.bino); t.rotation.x = Math.PI / 2; t.position.x = x; this.bino.add(t); }
     this.bino.position.set(0, 0.26, -0.45); this.bino.visible = false;
+    this.bino.userData.dynamic = true;
     this.neck.add(this.bino);
 
-    this.body = new THREE.Group();
+    this.body = new THREE.Bone();
     this.body.add(this.legs, this.upper);
     this.root.add(this.body);
+    this.bake();
 
     // team name tag (only shown to teammates)
     this.tag = nameSprite(name, this.team ? TEAM_COLOR[this.team] : '#ffffff');
@@ -188,7 +251,7 @@ export class Avatar {
   }
 
   limb(geo, material, x, y, isLeg) {
-    const pivot = new THREE.Group();
+    const pivot = new THREE.Bone();
     pivot.position.x = x;
     const m = new THREE.Mesh(geo, material);
     m.position.y = y; m.castShadow = true;
@@ -199,6 +262,99 @@ export class Avatar {
     end.castShadow = true;
     pivot.add(end);
     return pivot;
+  }
+
+  // Merge the freshly built rig into a few meshes. The joint objects (legs, arms, neck...)
+  // are kept, so all the animation code below works unchanged.
+  bake() {
+    const bones = [this.body, this.legs, this.legL, this.legR, this.upper, this.armL, this.armR, this.neck];
+    const boneIndex = new Map(bones.map((b, i) => [b, i]));
+    this.root.updateMatrixWorld(true);
+    const neckInv = new THREE.Matrix4().copy(this.neck.matrixWorld).invert();
+    const body = [], features = [], cheeks = [], under = [];
+    const remove = [];
+    const roleOf = (m) => (m === this.mShirt ? 'shirt' : m === this.mPants ? 'pants' : m === this.mSkin ? 'skin' : 'fixed');
+    this.body.traverse((o) => {
+      if (!o.isMesh || o === this.note) return;
+      // skip anything under an animated non-joint group (propeller blades, binoculars)
+      let a = o.parent, dynamic = false;
+      while (a && !boneIndex.has(a)) { if (a.userData.dynamic) dynamic = true; a = a.parent; }
+      if (dynamic || !a) return;
+      const m = o.material;
+      if (m.isMeshToonMaterial && m.side === THREE.FrontSide && !m.transparent) {
+        body.push({ mesh: o, matrix: o.matrixWorld.clone(), color: m.color.clone(), bone: boneIndex.get(a), role: roleOf(m) });
+        remove.push(o);
+      } else if (a === this.neck && (m === MAT.black || m === MAT.white)) {
+        features.push({ mesh: o, matrix: _m4.multiplyMatrices(neckInv, o.matrixWorld).clone(), color: m.color.clone() });
+        remove.push(o);
+      } else if (a === this.neck && m === MAT.cheek) {
+        cheeks.push({ mesh: o, matrix: _m4.multiplyMatrices(neckInv, o.matrixWorld).clone(), color: m.color.clone() });
+        remove.push(o);
+      } else if (a === this.neck && this.under.includes(o)) {
+        under.push({ mesh: o, matrix: _m4.multiplyMatrices(neckInv, o.matrixWorld).clone(), color: m.color.clone() });
+        remove.push(o);
+      }
+    });
+    const ownMats = new Set();
+    for (const o of remove) { if (o.material !== MAT.black && o.material !== MAT.white && o.material !== MAT.cheek && o.material !== MAT.shoe) ownMats.add(o.material); o.parent.remove(o); }
+    ownMats.forEach(m => { if (m !== this.mShirt && m !== this.mPants && m !== this.mSkin) m.dispose(); });
+
+    // skinned body
+    const geo = bakeParts(body, true);
+    this.skin = new THREE.SkinnedMesh(geo, SHARED.body);
+    this.skin.castShadow = true;
+    this.root.add(this.skin);
+    this.skin.bind(new THREE.Skeleton(bones));
+    this.skin.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 1.15, 0), 1.75);
+    this.colorRanges = geo.userData.ranges;
+
+    // face details (unlit, like before) and cheeks ride on the neck
+    this.features = new THREE.Mesh(bakeParts(features, false), SHARED.basic);
+    this.neck.add(this.features);
+    const ch = bakeParts(cheeks, false); ch.deleteAttribute('color');
+    this.cheeks = new THREE.Mesh(ch, MAT.cheek);
+    this.neck.add(this.cheeks);
+    // stacked notes: one mesh, the draw range shows 0, 1 or 2 of them
+    this.underMesh = new THREE.Mesh(bakeParts(under, false), SHARED.basic);
+    this.underMesh.visible = false;
+    this.neck.add(this.underMesh);
+    this.underIndex = under.length ? this.underMesh.geometry.userData.ranges[0].index : 0;
+    this.under = [];
+
+    // propeller blades: merged, still spinning on their own pivot
+    const spin = this.hat.userData.spin;
+    if (spin) {
+      spin.updateMatrixWorld(true);
+      const inv = new THREE.Matrix4().copy(spin.matrixWorld).invert();
+      const blades = [];
+      spin.traverse(o => { if (o.isMesh) blades.push({ mesh: o, matrix: _m4.multiplyMatrices(inv, o.matrixWorld).clone(), color: o.material.color.clone() }); });
+      const bm = new THREE.Mesh(bakeParts(blades, false), SHARED.toon);
+      bm.castShadow = true;
+      blades.forEach(b => { b.mesh.material.dispose(); b.mesh.parent.remove(b.mesh); });
+      spin.clear(); spin.add(bm);
+    }
+    // binoculars: two tubes, one mesh
+    {
+      const inv = new THREE.Matrix4().copy(this.bino.matrixWorld).invert();
+      const tubes = [];
+      this.bino.traverse(o => { if (o.isMesh) tubes.push({ mesh: o, matrix: _m4.multiplyMatrices(inv, o.matrixWorld).clone(), color: o.material.color.clone() }); });
+      const g = bakeParts(tubes, false);
+      tubes.forEach(t => t.mesh.geometry.dispose());
+      this.bino.clear();
+      this.bino.add(new THREE.Mesh(g, SHARED.toon));
+    }
+  }
+
+  recolor() {
+    const col = this.skin.geometry.attributes.color;
+    const shirt = new THREE.Color(this.team ? TEAM_COLOR[this.team] : this.shirt);
+    const pants = new THREE.Color(this.team === 1 ? '#a82838' : this.team === 2 ? '#24459a' : '#3b3f58');
+    for (const r of this.colorRanges) {
+      const c = r.role === 'shirt' ? shirt : r.role === 'pants' ? pants : null;
+      if (!c) continue;
+      for (let i = r.start; i < r.start + r.count; i++) col.setXYZ(i, c.r, c.g, c.b);
+    }
+    col.needsUpdate = true;
   }
 
   setNumber(num) {
@@ -212,7 +368,9 @@ export class Avatar {
   setNotes(n) {
     if (n === this.notes) return;
     this.notes = n;
-    this.under.forEach((u, i) => { u.visible = i < n - 1; });
+    const k = Math.max(0, Math.min(2, n - 1));
+    this.underMesh.visible = k > 0;
+    this.underMesh.geometry.setDrawRange(0, k * this.underIndex);
   }
 
   // spectators see everyone's name and number floating above their head
@@ -257,8 +415,7 @@ export class Avatar {
 
   setTeam(team) {
     this.team = team;
-    this.mShirt.color.set(team ? TEAM_COLOR[team] : this.shirt);
-    this.mPants.color.set(team === 1 ? '#a82838' : team === 2 ? '#24459a' : '#3b3f58');
+    this.recolor();
     const old = this.tag; this.root.remove(old);
     this.tag = nameSprite(this.name, team ? TEAM_COLOR[team] : '#ffffff');
     this.tag.position.y = 2.55; this.tag.visible = old.visible;
@@ -323,14 +480,21 @@ export class Avatar {
   }
 
   dispose() {
+    const shared = new Set([MAT.black, MAT.white, MAT.cheek, MAT.shoe, MAT.bino, SHARED.body, SHARED.toon, SHARED.basic]);
+    const ownGeo = new Set([this.skin.geometry, this.features.geometry, this.cheeks.geometry, this.underMesh.geometry]);
     this.root.traverse(o => {
+      if (o.isMesh && ownGeo.has(o.geometry)) o.geometry.dispose();
+      if (o.isMesh && o.parent === this.bino) o.geometry.dispose();
+      if (o.isMesh && this.hat.userData.spin && o.parent === this.hat.userData.spin) o.geometry.dispose();
       if (o.isMesh || o.isSprite) {
-        if (o.material && o.material !== MAT.black && o.material !== MAT.white && o.material !== MAT.cheek && o.material !== MAT.shoe && o.material !== MAT.bino) {
+        if (o.material && !shared.has(o.material)) {
           if (o.material.map && o.material.map !== this.noteTex) o.material.map.dispose();
           o.material.dispose?.();
         }
       }
     });
+    this.skin.skeleton.dispose();
+    this.mShirt.dispose(); this.mPants.dispose(); this.mSkin.dispose();
     this.noteTex.dispose();
   }
 }

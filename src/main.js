@@ -604,12 +604,12 @@ class App {
   }
 
   // ---------------------------------------------------------------- per frame
-  controlLocal(dt) {
+  controlLocal(dt, look = true) {
     const g = this.game, p = g.local;
-    const [dx, dy] = this.input.takeLook();
+    const [dx, dy] = look ? this.input.takeLook() : [0, 0];
     if (!p || !p.alive) return;
     const active = this.canAct() && g.phase !== 'end';
-    if (active) {
+    if (active && look) {
       const zf = p.zoom ? CFG.binoFov / this.settings.fov : 1;
       const k = 0.0022 * this.settings.sens * zf;
       p.yaw -= dx * k;
@@ -698,18 +698,27 @@ class App {
     let dt = (t - this.last) / 1000;
     this.last = t;
     if (!(dt > 0)) dt = 0.016;
-    dt = Math.min(dt, 0.05);
+    // Keep the game in real time on slow machines: a long frame is simulated as several
+    // steps of at most 50 ms (the same step size as before), instead of running slow-mo.
+    dt = Math.min(dt, 0.25);
+    const steps = Math.max(1, Math.ceil(dt / 0.05 - 1e-6));
+    const step = dt / steps;
     this.time += dt;
 
     const g = this.game || this.attract;
     if (g) {
       const frozen = this.state === 'paused' && this.session?.type === 'solo';
       if (!frozen) {
-        if (this.game) { if (this.spec) this.controlSpectator(dt); else this.controlLocal(dt); }
-        g.update(dt);
-        // solo spectators can fast-forward the rest of the round
-        if (this.game && this.fast && this.spec && this.session?.type === 'solo') for (let i = 0; i < 3; i++) g.update(dt);
-        if (this.game) { this.session?.tick(dt); this.sounds(dt); }
+        if (this.game && this.spec) this.controlSpectator(dt);
+        for (let i = 0; i < steps; i++) {
+          if (this.game && !this.spec) this.controlLocal(step, i === 0);
+          g.update(step);
+          // solo spectators can fast-forward the rest of the round
+          if (this.game && this.fast && this.spec && this.session?.type === 'solo') for (let k = 0; k < 3; k++) g.update(step);
+          if (this.game) this.sounds(step);
+        }
+        // network messages go out once per frame, stamped with the final state
+        if (this.game) this.session?.tick(dt);
       }
       if (this.game) {
         const me = this.game.local;
@@ -725,7 +734,7 @@ class App {
         const showScore = this.state === 'play' && (this.input.state().score || this.touchScore);
         this.hud.scoreboard(this.game, showScore);
         const ctp = this.state === 'play' && !this.touchMode && !this.input.locked && !this.input.lockFailed && !this.chatOpen && !this.input.noLock;
-        this.hud.el.ctp.hidden = !ctp;
+        if (this.hud.el.ctp.hidden !== !ctp) this.hud.el.ctp.hidden = !ctp;
         if (me && me.alive) audio.setListener(me.x, me.y + 1.6, me.z, me.yaw);
         else { const c = this.renderer.camera; audio.setListener(c.position.x, c.position.y, c.position.z, c.rotation.y); }
       } else {
@@ -737,7 +746,8 @@ class App {
     this.renderer.sync(dt, this.time, this.view);
     if (this.game) {
       this.markers();
-      this.hud.root.hidden = !(this.state === 'play' || (this.state === 'end' && !this.endShown));
+      const hideHud = !(this.state === 'play' || (this.state === 'end' && !this.endShown));
+      if (this.hud.root.hidden !== hideHud) this.hud.root.hidden = hideHud;
     }
     if (this.photoPending) {
       this.photoPending = false;

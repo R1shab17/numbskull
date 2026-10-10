@@ -1,7 +1,7 @@
 // Global tuning. Everything gameplay-related lives here so it is easy to tweak.
 
 export const VERSION = '1.0.0';
-export const NET_VERSION = 2;
+export const NET_VERSION = 3;
 export const MAX_PLAYERS = 20;
 
 // Quick play: public Battle Royale rooms that run back-to-back rounds.

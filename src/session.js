@@ -1,14 +1,14 @@
 // Online sessions. The host runs the real Game and relays it; clients mirror it.
 import { HostNet, ClientNet, onlineSupported } from './net.js';
-import { Game } from './game.js';
+import { Game, NET } from './game.js';
 import { MAX_PLAYERS, NET_VERSION, PUBLIC } from './config.js';
 import { PUBLIC_PREFIX } from './net.js';
 import { MAP_LIST } from './maps.js';
 
 export const publicId = (slot) => PUBLIC_PREFIX + slot;
 
-const SNAP_RATE = 1 / 15;
-const STATE_RATE = 1 / 20;
+const SNAP_RATE = 1 / NET.snapRate;
+const STATE_RATE = 1 / NET.stateRate;
 
 export class HostSession {
   // opts.public: a Quick play room that runs back-to-back Battle Royale rounds
@@ -243,6 +243,7 @@ export class ClientSession {
     if (!m || typeof m !== 'object') return;
     this.seen = performance.now();
     const app = this.app;
+    if (m instanceof ArrayBuffer) { if (app.game && this.inGame) app.game.applySnapshot(m); return; }
     switch (m.t) {
       case 'reject':
         this.closed = true; this.net.close();
@@ -272,7 +273,7 @@ export class ClientSession {
         break;
       }
       case 'ev': if (app.game && this.inGame) for (const e of m.e) app.game.applyEvent(e); break;
-      case 'snap': if (app.game && this.inGame) app.game.applySnapshot(m); break;
+
       case 'pong': this.ping = Math.round(performance.now() - m.c); break;
     }
   }

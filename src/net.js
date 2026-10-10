@@ -2,8 +2,13 @@
 // The host's browser runs the match; everyone else connects to it with a room code.
 import { Peer } from 'peerjs';
 
-const PREFIX = 'numbskull-room-v2-';
-export const PUBLIC_PREFIX = 'numbskull-pub-v2-';
+const PREFIX = 'numbskull-room-v3-';
+export const PUBLIC_PREFIX = 'numbskull-pub-v3-';
+
+// Messages travel raw: binary snapshots as ArrayBuffers, everything else as JSON text.
+// JSON is encoded once per broadcast instead of once per player.
+const encode = (msg) => (msg instanceof ArrayBuffer ? msg : JSON.stringify(msg));
+const decode = (d) => { if (typeof d !== 'string') return d; try { return JSON.parse(d); } catch { return null; } };
 const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 
 // Optional self-hosted signalling server: ?signal=https://your-peer-server.example/path
@@ -62,14 +67,15 @@ export class HostNet {
     this.peer.on('disconnected', () => { try { this.peer.reconnect(); } catch { /* ignore */ } });
     this.peer.on('connection', (conn) => {
       conn.on('open', () => { this.conns.set(conn.peer, conn); this.h.onConnect?.(conn); });
-      conn.on('data', (d) => this.h.onData?.(conn, d));
+      conn.on('data', (d) => this.h.onData?.(conn, decode(d)));
       conn.on('close', () => { this.conns.delete(conn.peer); this.h.onClose?.(conn); });
       conn.on('error', () => { this.conns.delete(conn.peer); this.h.onClose?.(conn); });
     });
   }
 
-  send(conn, msg) { try { if (conn.open) conn.send(msg); } catch { /* dropped */ } }
-  broadcast(msg, except) { for (const c of this.conns.values()) if (c !== except) this.send(c, msg); }
+  send(conn, msg) { this.sendRaw(conn, encode(msg)); }
+  sendRaw(conn, data) { try { if (conn.open) conn.send(data); } catch { /* dropped */ } }
+  broadcast(msg, except) { const data = encode(msg); for (const c of this.conns.values()) if (c !== except) this.sendRaw(c, data); }
   kick(conn) { try { conn.close(); } catch { /* ignore */ } }
   close() { try { for (const c of this.conns.values()) c.close(); this.peer?.destroy(); } catch { /* ignore */ } this.conns.clear(); }
 }
@@ -83,15 +89,15 @@ export class ClientNet {
     catch (e) { this.h.onError?.(errText(e)); return; }
     const timeout = setTimeout(() => { if (!opened) { this.h.onError?.(errText({ type: 'network' }), this.peer && this.peer.open ? 'timeout' : 'network'); this.close(); } }, timeoutMs);
     this.peer.on('open', () => {
-      this.conn = this.peer.connect(fullId || PREFIX + code.toUpperCase(), { reliable: true, serialization: 'json' });
+      this.conn = this.peer.connect(fullId || PREFIX + code.toUpperCase(), { reliable: true, serialization: 'raw' });
       this.conn.on('open', () => { opened = true; clearTimeout(timeout); this.h.onOpen?.(); });
-      this.conn.on('data', (d) => this.h.onData?.(d));
+      this.conn.on('data', (d) => this.h.onData?.(decode(d)));
       this.conn.on('close', () => this.h.onClose?.());
       this.conn.on('error', () => this.h.onClose?.());
     });
     this.peer.on('error', (e) => { clearTimeout(timeout); opened = true; this.h.onError?.(errText(e), e.type); });
   }
 
-  send(msg) { try { if (this.conn && this.conn.open) this.conn.send(msg); } catch { /* dropped */ } }
+  send(msg) { try { if (this.conn && this.conn.open) this.conn.send(encode(msg)); } catch { /* dropped */ } }
   close() { try { this.conn?.close(); this.peer?.destroy(); } catch { /* ignore */ } }
 }

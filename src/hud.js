@@ -6,6 +6,18 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 const GCOL = { flash: '#e8eef6', smoke: '#8fd58c', distract: '#ff8ad8' };
 const GKEY = { flash: 'F', smoke: 'S', distract: 'D' };
 
+// The HUD updates every frame. Only touch the DOM when a value actually changes, so a
+// steady frame costs the browser no style recalculation or layout.
+const hide = (el, v) => { if (el.hidden !== v) el.hidden = v; };
+const PROPS = new Set(['className', 'title', 'textContent', 'innerHTML']);
+function put(el, key, v) {
+  const c = el._put || (el._put = {});
+  if (c[key] === v) return;
+  c[key] = v;
+  if (PROPS.has(key)) el[key] = v;
+  else el.style.setProperty(key, v);
+}
+
 export class Hud {
   constructor() {
     this.root = $('hud');
@@ -197,24 +209,24 @@ export class Hud {
       const alive = game.aliveCount();
       sl = `<small>Alive</small>${alive}`;
       sr = `${local ? local.kills : 0}<small>Out</small>`;
-      E.sl.className = 'scorechip'; E.sr.className = 'scorechip alt'; E.sr.style.background = '#fff';
-      E.sl.title = 'Players still in'; E.sr.title = 'Players you knocked out';
+      put(E.sl, 'className', 'scorechip'); put(E.sr, 'className', 'scorechip alt'); put(E.sr, 'background', '#fff');
+      put(E.sl, 'title', 'Players still in'); put(E.sr, 'title', 'Players you knocked out');
     } else if (game.teams) {
       const lim = game.scoreLimit;
       sl = `<small>Red</small>${game.teamScore[1]}`; sr = `${game.teamScore[2]}<small>Blue</small>`;
-      E.sl.className = 'scorechip red' + (game.teamScore[1] > game.teamScore[2] ? ' lead' : '');
-      E.sr.className = 'scorechip blue' + (game.teamScore[2] > game.teamScore[1] ? ' lead' : '');
-      E.sl.title = E.sr.title = `First to ${lim}`;
+      put(E.sl, 'className', 'scorechip red' + (game.teamScore[1] > game.teamScore[2] ? ' lead' : ''));
+      put(E.sr, 'className', 'scorechip blue' + (game.teamScore[2] > game.teamScore[1] ? ' lead' : ''));
+      put(E.sl, 'title', `First to ${lim}`); put(E.sr, 'title', `First to ${lim}`);
     } else {
       const l = game.leader();
       const me = local;
       sl = `<small>You</small>${me ? me.kills : 0}`;
       const other = l && me && l.id === me.id ? [...game.players.values()].filter(p => p.id !== me.id).sort((a, b) => b.kills - a.kills)[0] : l;
       sr = `${other ? other.kills : 0}<small>${other ? esc(other.name) : '—'}</small>`;
-      E.sl.className = 'scorechip' + (me && l && me.id === l.id ? ' lead' : '');
-      E.sr.className = 'scorechip alt';
-      E.sr.style.background = '#fff';
-      E.sl.title = E.sr.title = `First to ${game.scoreLimit} reads`;
+      put(E.sl, 'className', 'scorechip' + (me && l && me.id === l.id ? ' lead' : ''));
+      put(E.sr, 'className', 'scorechip alt');
+      put(E.sr, 'background', '#fff');
+      put(E.sl, 'title', `First to ${game.scoreLimit} reads`); put(E.sr, 'title', `First to ${game.scoreLimit} reads`);
     }
     if (sl !== this._sl) { E.sl.innerHTML = sl; this._sl = sl; }
     if (sr !== this._sr) { E.sr.innerHTML = sr; this._sr = sr; }
@@ -238,8 +250,8 @@ export class Hud {
       if (zt !== this._zt) { E.zonebar.textContent = zt; this._zt = zt; }
       E.zonebar.classList.toggle('closing', Z.state === 'shrink');
       const out = local && local.alive && (local.outT || 0) > 0.05 && game.phase === 'play';
-      E.zonewarn.hidden = !out;
-      if (out) E.zonesecs.textContent = Math.max(0, Math.ceil(4 - local.outT));
+      hide(E.zonewarn, !out);
+      if (out) put(E.zonesecs, 'textContent', String(Math.max(0, Math.ceil(4 - local.outT))));
     }
 
     if (!local) return;
@@ -252,18 +264,18 @@ export class Hud {
 
     // flash / blind
     const blind = local.alive ? Math.min(1, local.blind * 1.7) : 0;
-    E.flash.style.opacity = blind.toFixed(3);
-    E.blindtext.hidden = !(local.blind > CFG.blindKillThreshold);
+    put(E.flash, 'opacity', blind.toFixed(3));
+    hide(E.blindtext, !(local.blind > CFG.blindKillThreshold));
 
     // binoculars
-    E.bino.hidden = !(local.alive && local.zoom && view.mode === 'fp');
-    E.crosshair.style.opacity = local.alive && view.mode === 'fp' ? 1 : 0;
+    hide(E.bino, !(local.alive && local.zoom && view.mode === 'fp'));
+    put(E.crosshair, 'opacity', local.alive && view.mode === 'fp' ? '1' : '0');
 
     // jam
     E.typebar.classList.toggle('jam', local.jam > 0);
-    if (local.jam > 0) E.jambar.style.transform = `scaleX(${Math.max(0, local.jam / CFG.jamTime)})`;
-    E.typebar.style.opacity = local.alive ? 1 : 0.3;
-    if (this.hintShown < 25) { this.hintShown += dt; E.hint.hidden = false; } else E.hint.hidden = true;
+    if (local.jam > 0) put(E.jambar, 'transform', `scaleX(${Math.max(0, local.jam / CFG.jamTime)})`);
+    put(E.typebar, 'opacity', local.alive ? '1' : '0.3');
+    if (this.hintShown < 25) { this.hintShown += dt; hide(E.hint, false); } else hide(E.hint, true);
 
     // gadgets
     const sig = GADGETS.map(g => local.inv[g]).join() + view.gadget + Math.ceil(local.camCd * 4) + (local.alive ? 1 : 0);
@@ -282,14 +294,14 @@ export class Hud {
     // photo
     if (this.photoT > 0) {
       this.photoT -= dt;
-      E.phototime.textContent = Math.max(0, Math.ceil(this.photoT));
+      put(E.phototime, 'textContent', String(Math.max(0, Math.ceil(this.photoT))));
       if (this.photoT <= 0) E.photo.hidden = true;
     }
     if (this.centerT > 0) { this.centerT -= dt; if (this.centerT <= 0) E.center.className = ''; }
 
     // death screen
     if (!local.alive && local.killedBy != null && game.phase !== 'end') {
-      E.death.hidden = false;
+      hide(E.death, false);
       const k = game.players.get(local.killedBy);
       const by = k ? esc(k.name) : 'someone';
       let html = local.killedCode === 'ZONE' ? 'Caught by the zone' : `Read by ${by}`;
@@ -299,8 +311,8 @@ export class Hud {
         E.deathcode.textContent = local.killedCode || '';
         this._death = html + local.killedCode;
       }
-      E.respawn.innerHTML = game.br ? 'Spectating in a moment…' : local.respawnT > 0 || !game.authority ? `Back in <b>${Math.max(1, Math.ceil(local.respawnT))}</b>` : 'Respawning…';
-    } else { E.death.hidden = true; this._death = ''; }
+      put(E.respawn, 'innerHTML', game.br ? 'Spectating in a moment…' : local.respawnT > 0 || !game.authority ? `Back in <b>${Math.max(1, Math.ceil(local.respawnT))}</b>` : 'Respawning…');
+    } else { hide(E.death, true); this._death = ''; }
 
     this.drawMinimap(game, local);
   }
@@ -312,24 +324,24 @@ export class Hud {
     if (!on) return;
     const t = info.target;
     const god = view.mode === 'spec-god';
-    E.specLbl.textContent = info.late ? 'Next round soon · spectating' : god ? 'God view' : 'Spectating';
+    put(E.specLbl, 'textContent', info.late ? 'Next round soon · spectating' : god ? 'God view' : 'Spectating');
     const name = god ? `${game.aliveCount()} left` : t ? t.name : 'nobody';
     if (E.specName.textContent !== name) E.specName.textContent = name;
     const inf = god ? 'Click a player to follow them' : t ? `${t.num} · ${t.kills} out · ${'■'.repeat(t.notes || 1)} ${t.notes > 1 ? 'notes' : 'note'}` : '';
     if (E.specInfo.textContent !== inf) E.specInfo.textContent = inf;
-    E.specView.textContent = god ? 'Follow player' : 'God view';
+    put(E.specView, 'textContent', god ? 'Follow player' : 'God view');
     E.specView.classList.toggle('on', god);
-    E.specFast.hidden = !info.canFast;
-    E.specFast.textContent = info.fast ? 'Normal speed' : 'Fast-forward';
+    hide(E.specFast, !info.canFast);
+    put(E.specFast, 'textContent', info.fast ? 'Normal speed' : 'Fast-forward');
     E.specFast.classList.toggle('on', !!info.fast);
-    E.specHint.textContent = god ? 'WASD or drag to pan · wheel to zoom · Q/E to rotate · V to follow' : '← → switch player · V god view · drag to look around';
+    put(E.specHint, 'textContent', god ? 'WASD or drag to pan · wheel to zoom · Q/E to rotate · V to follow' : '← → switch player · V god view · drag to look around');
   }
 
   setWatched(on, wx, wy) {
     const E = this.el;
-    E.watch.style.opacity = on ? 1 : 0;
-    if (on) { E.watch.style.setProperty('--wx', wx + '%'); E.watch.style.setProperty('--wy', wy + '%'); }
-    E.eye.hidden = !on;
+    put(E.watch, 'opacity', on ? '1' : '0');
+    if (on) { put(E.watch, '--wx', wx + '%'); put(E.watch, '--wy', wy + '%'); }
+    hide(E.eye, !on);
     E.mynote.classList.toggle('watched', on);
   }
 
@@ -342,7 +354,7 @@ export class Hud {
 
   scoreboard(game, show) {
     const E = this.el.scoreboard;
-    E.hidden = !show;
+    hide(E, !show);
     this.root.classList.toggle('sb', !!show);
     if (!show) return;
     const me = game.localId;

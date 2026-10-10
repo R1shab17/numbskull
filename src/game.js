@@ -15,6 +15,43 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const rand = (a, b) => a + Math.random() * (b - a);
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
+// Network smoothing: other players are shown slightly in the past, interpolated between
+// the two states that surround that moment. Movement stays smooth even when packets
+// arrive unevenly. The delay adapts to the connection (about 70 ms on a steady one).
+export const NET = { snapRate: 20, stateRate: 20 };
+const wrapAngle = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
+const nowSec = () => performance.now() / 1000;
+
+function pushState(p, t, x, y, z, yaw, pitch, fl) {
+  const b = p.buf;
+  const last = b[b.length - 1];
+  if (last && t <= last.t) return;
+  // a big jump is a teleport (respawn): don't slide across the map
+  if (last && Math.hypot(x - last.x, z - last.z) > 6) b.length = 0;
+  b.push({ t, x, y, z, yaw, pitch, fl });
+  if (b.length > 32) b.shift();
+}
+
+function sampleState(p, T) {
+  const b = p.buf;
+  if (!b.length) return false;
+  while (b.length > 2 && b[1].t <= T) b.shift();
+  const a = b[0];
+  let c = b.length > 1 ? b[1] : null;
+  let k = 0;
+  // a late packet: keep moving along the last known path for up to 0.1 s rather than freezing
+  if (c && T > c.t) k = 1 + Math.min(0.1, T - c.t) / (c.t - a.t);
+  else if (c && T > a.t) k = (T - a.t) / (c.t - a.t);
+  if (!c) c = a;
+  p.x = a.x + (c.x - a.x) * k; p.y = a.y + (c.y - a.y) * k; p.z = a.z + (c.z - a.z) * k;
+  p.yaw = a.yaw + wrapAngle(c.yaw - a.yaw) * k;
+  p.pitch = a.pitch + (c.pitch - a.pitch) * k;
+  const fl = k < 0.5 ? a.fl : c.fl;
+  p.crouch = !!(fl & 2); p.zoom = !!(fl & 4); p.onGround = !!(fl & 8);
+  p.netSpeed = c !== a && c.t > a.t ? Math.hypot(c.x - a.x, c.z - a.z) / (c.t - a.t) : 0;
+  return true;
+}
+
 export function eyeHeight(p) { return lerp(CFG.eyeStand, CFG.eyeCrouch, p.crouchK); }
 export function foreheadHeight(p) { return lerp(CFG.foreheadStand, CFG.foreheadCrouch, p.crouchK); }
 
@@ -134,6 +171,7 @@ export class Game {
       remote: !!o.remote, human: !o.isBot, ping: 0,
       // interpolation targets for mirrored players
       tx: 0, ty: 0, tz: 0, tyaw: 0, tpitch: 0, hasT: false,
+      buf: [], off: null, jit: 0.03, netSpeed: 0,
     };
     if (this.nextId <= p.id) this.nextId = p.id + 1;
     return p;
@@ -254,6 +292,7 @@ export class Game {
         const p = P(ev.id); if (!p) break;
         Object.assign(p, { x: ev.x, y: ev.y, z: ev.z, tx: ev.x, ty: ev.y, tz: ev.z, yaw: ev.yaw, tyaw: ev.yaw, pitch: 0, vx: 0, vy: 0, vz: 0,
           alive: true, num: ev.num, protect: CFG.spawnProtect, blind: 0, jam: 0, carrying: 0, zoom: false, crouch: false, camCd: 0, hasT: false });
+        p.buf.length = 0;
         if (ev.team) p.team = ev.team;
         p.spawned = true; p.outT = 0; p.notes = this.lives;
         if (this.br) p.protect = ZONE.dropProtect + Math.max(0, this.phase === 'countdown' ? this.phaseT : 0);
@@ -496,6 +535,9 @@ export class Game {
   update(dt) {
     this.time += dt;
     const A = this.authority;
+    // let the clock estimates drift back if the other side's clock ran slow for a while
+    if (!A && this.clockOff != null) this.clockOff -= dt * 0.1;
+    if (A) for (const p of this.players.values()) if (p.off != null) p.off += dt * 0.1;
     // phases
     if (this.phase === 'countdown') {
       this.phaseT -= dt;
@@ -526,16 +568,14 @@ export class Game {
       } else if (p.id === this.localId) {
         // local human movement is applied by the controller before update()
       } else if (p.remote || !A) {
-        // mirrored player: ease toward the latest network state
-        if (p.hasT) {
-          const k = Math.min(1, dt * 14);
-          const ox = p.x, oz = p.z;
-          p.x += (p.tx - p.x) * k; p.y += (p.ty - p.y) * k; p.z += (p.tz - p.z) * k;
-          let dyaw = p.tyaw - p.yaw; while (dyaw > Math.PI) dyaw -= Math.PI * 2; while (dyaw < -Math.PI) dyaw += Math.PI * 2;
-          p.yaw += dyaw * k; p.pitch += (p.tpitch - p.pitch) * k;
-          p.crouchK += ((p.crouch ? 1 : 0) - p.crouchK) * Math.min(1, dt * 12);
-          const sp = Math.hypot(p.x - ox, p.z - oz) / Math.max(dt, 1e-3);
-          p.speed += (sp - p.speed) * Math.min(1, dt * 8);
+        // mirrored player: interpolate between buffered network states
+        const T = A ? this.time - (1 / NET.stateRate + clamp(p.jit, 0.02, 0.25))
+          : nowSec() + this.clockOff - (1 / NET.snapRate + clamp(this.jit, 0.02, 0.25));
+        if (this.clockOff != null || A) {
+          if (sampleState(p, T)) {
+            p.crouchK += ((p.crouch ? 1 : 0) - p.crouchK) * Math.min(1, dt * 12);
+            p.speed += (p.netSpeed - p.speed) * Math.min(1, dt * 8);
+          }
         }
       }
 
@@ -717,52 +757,78 @@ export class Game {
     if (s.zone && this.zone) Object.assign(this.zone, s.zone);
   }
 
-  // compact snapshot of every player's continuous state
+  // Binary snapshot of every player's continuous state (about 3x smaller than JSON).
+  // layout: u8 kind=1, u8 phase, u16 count, f64 hostTime, f32 timeLeft, u8 hasZone, u8 zoneState, u16 pad,
+  //         f32 x7 zone (x, z, r, nx, nz, nr, t), then per player:
+  //         u16 id, u8 flags, u8 blind, f32 x, y, z, yaw, pitch
   snapshot() {
-    const arr = [];
+    const n = this.players.size;
+    const buf = new ArrayBuffer(48 + n * 24), v = new DataView(buf);
+    v.setUint8(0, 1);
+    v.setUint8(1, this.phase === 'countdown' ? 0 : this.phase === 'play' ? 1 : 2);
+    v.setUint16(2, n, true);
+    v.setFloat64(4, this.time, true);
+    v.setFloat32(12, this.timeLeft, true);
+    const z = this.zone;
+    if (z) {
+      v.setUint8(16, 1); v.setUint8(17, z.state === 'wait' ? 0 : z.state === 'shrink' ? 1 : 2);
+      [z.x, z.z, z.r, z.nx, z.nz, z.nr, Math.max(0, z.t)].forEach((f, i) => v.setFloat32(20 + i * 4, f, true));
+    }
+    let o = 48;
     for (const p of this.players.values()) {
       const fl = (p.alive ? 1 : 0) | (p.crouch ? 2 : 0) | (p.zoom ? 4 : 0) | (p.onGround ? 8 : 0) | (p.protect > 0 ? 16 : 0);
-      arr.push(p.id, Math.round(p.x * 100), Math.round(p.y * 100), Math.round(p.z * 100), Math.round(p.yaw * 1000), Math.round(p.pitch * 1000), fl, Math.round(p.blind * 100));
+      v.setUint16(o, p.id, true); v.setUint8(o + 2, fl); v.setUint8(o + 3, Math.round(clamp(p.blind, 0, 1) * 100));
+      v.setFloat32(o + 4, p.x, true); v.setFloat32(o + 8, p.y, true); v.setFloat32(o + 12, p.z, true);
+      v.setFloat32(o + 16, wrapAngle(p.yaw), true); v.setFloat32(o + 20, p.pitch, true);
+      o += 24;
     }
-    const z = this.zone;
-    const zs = z ? [Math.round(z.x * 10), Math.round(z.z * 10), Math.round(z.r * 10), Math.round(z.nx * 10), Math.round(z.nz * 10), Math.round(z.nr * 10), Math.round(Math.max(0, z.t) * 10), z.state === 'wait' ? 0 : z.state === 'shrink' ? 1 : 2] : null;
-    return { t: 'snap', p: arr, tl: Math.round(this.timeLeft * 10), ph: this.phase, zs };
+    return buf;
   }
 
-  applySnapshot(s) {
-    const a = s.p;
-    for (let i = 0; i < a.length; i += 8) {
-      const p = this.players.get(a[i]);
+  applySnapshot(buf) {
+    const v = new DataView(buf);
+    if (v.getUint8(0) !== 1) return;
+    const ht = v.getFloat64(4, true);
+    // host clock estimate: the earliest-arriving snapshots define the offset, lateness is jitter
+    const wall = nowSec();
+    const off = ht - wall;
+    if (this.clockOff == null || off > this.clockOff) this.clockOff = off;
+    this.jit = Math.max((wall + this.clockOff) - ht, (this.jit ?? 0.03) * 0.99);
+    this.timeLeft = v.getFloat32(12, true);
+    if (v.getUint8(16) && this.zone) {
+      const z = this.zone, st = v.getUint8(17);
+      z.x = v.getFloat32(20, true); z.z = v.getFloat32(24, true); z.r = v.getFloat32(28, true);
+      z.nx = v.getFloat32(32, true); z.nz = v.getFloat32(36, true); z.nr = v.getFloat32(40, true); z.t = v.getFloat32(44, true);
+      z.state = st === 0 ? 'wait' : st === 1 ? 'shrink' : 'final';
+    }
+    const n = v.getUint16(2, true);
+    let o = 48;
+    for (let i = 0; i < n; i++, o += 24) {
+      const p = this.players.get(v.getUint16(o, true));
       if (!p || p.id === this.localId) continue;
-      p.tx = a[i + 1] / 100; p.ty = a[i + 2] / 100; p.tz = a[i + 3] / 100;
-      p.tyaw = a[i + 4] / 1000; p.tpitch = a[i + 5] / 1000;
-      const fl = a[i + 6];
-      p.crouch = !!(fl & 2); p.zoom = !!(fl & 4); p.onGround = !!(fl & 8);
-      if (!p.hasT || Math.hypot(p.tx - p.x, p.tz - p.z) > 6) { p.x = p.tx; p.y = p.ty; p.z = p.tz; p.yaw = p.tyaw; }
+      const fl = v.getUint8(o + 2);
+      p.blind = v.getUint8(o + 3) / 100;
+      pushState(p, ht, v.getFloat32(o + 4, true), v.getFloat32(o + 8, true), v.getFloat32(o + 12, true), v.getFloat32(o + 16, true), v.getFloat32(o + 20, true), fl);
       p.hasT = true;
-      p.blind = a[i + 7] / 100;
-    }
-    if (s.tl != null) this.timeLeft = s.tl / 10;
-    if (s.zs && this.zone) {
-      const z = this.zone, a = s.zs;
-      z.x = a[0] / 10; z.z = a[1] / 10; z.r = a[2] / 10; z.nx = a[3] / 10; z.nz = a[4] / 10; z.nr = a[5] / 10; z.t = a[6] / 10;
-      z.state = a[7] === 0 ? 'wait' : a[7] === 1 ? 'shrink' : 'final';
     }
   }
 
-  // state the client reports about itself
+  // state the client reports about itself (s[8] is the client's clock, for smoothing on the host)
   localStateMsg() {
     const p = this.local;
-    return { t: 'st', s: [Math.round(p.x * 100), Math.round(p.y * 100), Math.round(p.z * 100), Math.round(p.yaw * 1000), Math.round(p.pitch * 1000), (p.crouch ? 2 : 0) | (p.zoom ? 4 : 0) | (p.onGround ? 8 : 0), Math.round(p.aspect * 100), Math.round(p.fov)] };
+    return { t: 'st', s: [Math.round(p.x * 100), Math.round(p.y * 100), Math.round(p.z * 100), Math.round(wrapAngle(p.yaw) * 1000), Math.round(p.pitch * 1000), (p.crouch ? 2 : 0) | (p.zoom ? 4 : 0) | (p.onGround ? 8 : 0), Math.round(p.aspect * 100), Math.round(p.fov), Math.round(nowSec() * 1000)] };
   }
 
   applyRemoteState(id, s) {
     const p = this.players.get(id);
     if (!p || !p.alive) return;
-    p.tx = s[0] / 100; p.ty = s[1] / 100; p.tz = s[2] / 100; p.tyaw = s[3] / 1000; p.tpitch = s[4] / 1000;
-    p.crouch = !!(s[5] & 2); p.zoom = !!(s[5] & 4); p.onGround = !!(s[5] & 8);
     p.aspect = (s[6] || 170) / 100; p.fov = s[7] || CFG.fov;
-    if (!p.hasT || Math.hypot(p.tx - p.x, p.tz - p.z) > 6) { p.x = p.tx; p.y = p.ty; p.z = p.tz; p.yaw = p.tyaw; }
-    p.hasT = true;
+    const ct = (s[8] != null ? s[8] : nowSec() * 1000) / 1000;
+    const off = this.time - ct;
+    if (p.off == null || off < p.off) p.off = off;
+    const t = ct + p.off;
+    p.jit = Math.max(this.time - t, p.jit * 0.99);
+    pushState(p, t, s[0] / 100, s[1] / 100, s[2] / 100, s[3] / 1000, s[4] / 1000, s[5] | 1);
+    if (!p.hasT) { sampleState(p, t); p.hasT = true; }
   }
 }

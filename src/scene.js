@@ -1,6 +1,7 @@
 // Builds the three.js scene for a map: merged box geometry, ground, sky, lights,
 // scenery outside the walls, decorations, flags and pickups.
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 function seeded(seed) {
   let s = seed >>> 0;
@@ -260,6 +261,7 @@ function makeLamp(night) {
 // scenery outside the arena: hills and houses, warehouses, or a lit skyline
 function makeOutskirts(map, quality) {
   const g = new THREE.Group();
+  const skyTiles = [], skyMeshes = [];
   const rnd = seeded(map.id.length * 97 + 3);
   const hw = map.width / 2, hd = map.depth / 2;
   const n = quality > 1 ? 70 : 40;
@@ -287,18 +289,139 @@ function makeOutskirts(map, quality) {
       mesh.position.y = h / 2;
     } else {
       const h = 14 + rnd() * 40, w = 7 + rnd() * 9;
+      // the same random windows as always, but each tower's 64x128 pattern becomes one
+      // layer of a texture array so every tower is drawn in a single call
       const c = document.createElement('canvas'); c.width = 64; c.height = 128;
       const cg = c.getContext('2d'); cg.fillStyle = '#1d1638'; cg.fillRect(0, 0, 64, 128);
       for (let yy = 4; yy < 128; yy += 10) for (let xx = 4; xx < 64; xx += 10) if (rnd() < 0.45) { cg.fillStyle = ['#ffd27a', '#ff9ad5', '#7af2ff', '#fff4c2'][Math.floor(rnd() * 4)]; cg.fillRect(xx, yy, 5, 6); }
-      const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
-      t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(Math.round(w / 6), Math.round(h / 12));
-      mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), new THREE.MeshBasicMaterial({ map: t, fog: true }));
+      const geo = new THREE.BoxGeometry(w, h, w);
+      const rx = Math.round(w / 6), ry = Math.round(h / 12);
+      const uv = geo.attributes.uv;
+      for (let k = 0; k < uv.count; k++) uv.setXY(k, uv.getX(k) * rx, uv.getY(k) * ry);
+      geo.setAttribute('layer', new THREE.BufferAttribute(new Float32Array(uv.count).fill(skyTiles.length), 1));
+      skyTiles.push(c);
+      mesh = new THREE.Mesh(geo, null);
+      skyMeshes.push(mesh);
       mesh.position.y = h / 2;
     }
     mesh.position.x = x; mesh.position.z = z;
     g.add(mesh);
   }
+  if (skyMeshes.length) {
+    const mat = skylineMaterial(skyTiles);
+    for (const m of skyMeshes) m.material = mat;
+  }
   return g;
+}
+
+// Equivalent of MeshBasicMaterial({ map, fog: true }) where each tower picks its own
+// texture layer. Hardware repeat and mipmaps work per layer, exactly like separate textures.
+function skylineMaterial(tiles) {
+  const W = 64, H = 128, n = tiles.length;
+  const data = new Uint8Array(W * H * 4 * n);
+  tiles.forEach((c, i) => {
+    const px = c.getContext('2d').getImageData(0, 0, W, H).data;
+    // canvas textures are flipped vertically on upload; do the same here
+    for (let y = 0; y < H; y++) data.set(px.subarray((H - 1 - y) * W * 4, (H - y) * W * 4), (i * H + y) * W * 4);
+  });
+  const tex = new THREE.DataArrayTexture(data, W, H, n);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.LinearFilter; tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
+  tex.needsUpdate = true;
+  const mat = new THREE.ShaderMaterial({
+    fog: true,
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { tiles: { value: null } }]),
+    vertexShader: `
+      #include <common>
+      #include <fog_pars_vertex>
+      attribute float layer;
+      varying vec2 vTileUv;
+      varying float vLayer;
+      void main() {
+        vTileUv = uv; vLayer = layer;
+        vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: `
+      precision highp sampler2DArray;
+      uniform sampler2DArray tiles;
+      varying vec2 vTileUv;
+      varying float vLayer;
+      #include <common>
+      #include <fog_pars_fragment>
+      void main() {
+        vec4 diffuseColor = texture( tiles, vec3( vTileUv, floor( vLayer + 0.5 ) ) );
+        gl_FragColor = vec4( diffuseColor.rgb, diffuseColor.a );
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+        #include <fog_fragment>
+      }`,
+  });
+  mat.uniforms.tiles.value = tex;
+  return mat;
+}
+
+// ---------------------------------------------------------------- static batching
+// Meshes that never move and share identical material settings are merged into one
+// mesh per material. Same geometry, same material, same shadow flags: same pixels,
+// just far fewer draw calls.
+function matKey(o) {
+  const m = o.material;
+  return [m.isShaderMaterial ? m.uuid : m.type, m.color && m.color.getHexString(), m.emissive && m.emissive.getHexString(), m.emissiveIntensity, m.flatShading, m.side,
+    m.transparent, m.opacity, m.map ? m.map.uuid : '', m.fog, m.depthWrite, m.vertexColors, o.castShadow, o.receiveShadow, o.renderOrder].join('|');
+}
+
+function batchStatic(scene, roots) {
+  scene.updateMatrixWorld(true);
+  const groups = new Map();
+  for (const r of roots) r.traverse(o => {
+    if (!o.isMesh || o.isInstancedMesh || o.isSkinnedMesh || Array.isArray(o.material)) return;
+    const k = matKey(o);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(o);
+  });
+  const dispose = new Set();
+  for (const list of groups.values()) {
+    const keep = list[0].material;
+    const anyNonIndexed = list.some(o => !o.geometry.index);
+    const common = Object.keys(list[0].geometry.attributes).filter(n => list.every(o => o.geometry.attributes[n]));
+    const geos = list.map(o => {
+      let g = o.geometry.clone();
+      if (anyNonIndexed && g.index) g = g.toNonIndexed();
+      g.applyMatrix4(o.matrixWorld);
+      for (const name of Object.keys(g.attributes)) if (!common.includes(name)) g.deleteAttribute(name);
+      return g;
+    });
+    const merged = mergeGeometries(geos, false);
+    geos.forEach(g => g.dispose());
+    const mesh = new THREE.Mesh(merged, keep);
+    mesh.castShadow = list[0].castShadow; mesh.receiveShadow = list[0].receiveShadow; mesh.renderOrder = list[0].renderOrder;
+    mesh.matrixAutoUpdate = false;
+    for (const o of list) { if (o.material !== keep) dispose.add(o.material); o.geometry.dispose(); o.parent.remove(o); }
+    scene.add(mesh);
+  }
+  dispose.forEach(m => m.dispose());
+  // drop the now-empty groups
+  for (const r of roots) {
+    let hasMesh = false;
+    r.traverse(o => { if (o.isMesh || o.isLine || o.isPoints || o.isSprite) hasMesh = true; });
+    if (!hasMesh && r.parent) r.parent.remove(r);
+  }
+}
+
+// All pickup crates and their rings as two instanced meshes.
+export function makePickupInstances(n) {
+  const box = new THREE.InstancedMesh(new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshLambertMaterial({ map: noteTexture('+1', { paper: '#7ef0c8' }) }), Math.max(1, n));
+  box.castShadow = true;
+  const ring = new THREE.InstancedMesh(new THREE.TorusGeometry(0.55, 0.04, 6, 24), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.6 }), Math.max(1, n));
+  box.count = ring.count = n;
+  box.frustumCulled = ring.frustumCulled = false;
+  box.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  ring.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  return { box, ring };
 }
 
 export function makeFlagMesh(teamColor) {
@@ -376,6 +499,7 @@ export function buildScene(map, quality = 2) {
   far.rotation.x = -Math.PI / 2; far.position.y = -0.05;
   scene.add(far);
 
+  const statics = [];
   // paths / floor markings
   for (const [x, z, w, d] of map.paths || []) {
     const neon = map.pathStyle === 'neon';
@@ -384,7 +508,7 @@ export function buildScene(map, quality = 2) {
     const p = new THREE.Mesh(new THREE.PlaneGeometry(w, d), mat);
     p.rotation.x = -Math.PI / 2; p.position.set(x + w / 2, 0.012, z + d / 2);
     p.receiveShadow = !neon && quality > 0;
-    scene.add(p);
+    scene.add(p); statics.push(p);
   }
 
   for (const m of buildBoxes(map, T, quality)) scene.add(m);
@@ -414,13 +538,13 @@ export function buildScene(map, quality = 2) {
       for (let k = 0; k < 4; k++) { const s = new THREE.Mesh(new THREE.IcosahedronGeometry(6 + r() * 6, 0), cm); s.position.set(k * 7 - 10, r() * 3, r() * 5); s.scale.y = 0.6; c.add(s); }
       const a = r() * Math.PI * 2, d = 150 + r() * 160;
       c.position.set(Math.cos(a) * d, 60 + r() * 50, Math.sin(a) * d);
-      scene.add(c);
+      scene.add(c); statics.push(c);
     }
   }
 
   // trees
   const tr = seeded(99);
-  for (const t of map.trees || []) { const m = makeTree(tr); m.position.set(t.x, 0, t.z); m.rotation.y = tr() * 6; scene.add(m); }
+  for (const t of map.trees || []) { const m = makeTree(tr); m.position.set(t.x, 0, t.z); m.rotation.y = tr() * 6; scene.add(m); statics.push(m); }
   // decor
   for (const d of map.decor || []) {
     let m = null;
@@ -431,9 +555,14 @@ export function buildScene(map, quality = 2) {
       m = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 1.3), new THREE.MeshBasicMaterial({ map: signTexture(d.text, d.color) }));
       m.position.set(d.x, d.y, d.z); m.rotation.y = d.rot || 0;
     }
-    if (m) scene.add(m);
+    if (m) { scene.add(m); statics.push(m); }
   }
-  scene.add(makeOutskirts(map, quality));
+  const outskirts = makeOutskirts(map, quality);
+  scene.add(outskirts); statics.push(outskirts);
+  batchStatic(scene, statics);
+
+  // nothing below moves: skip their per-frame matrix updates
+  scene.traverse(o => { if (o !== scene && !o.isLight && (o.isMesh || o.isLine || o.isPoints)) { o.updateMatrix(); o.matrixAutoUpdate = false; } });
 
   return { scene, sun, hemi };
 }
