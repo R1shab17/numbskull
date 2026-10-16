@@ -208,8 +208,14 @@ function makeTree(rnd) {
 }
 
 // Default look of the sticky notes on everyone's heads (a map pack's theme can change it).
-const NOTE = { paper: '#ffe45c', ink: '#17141f' };
-export function setNoteStyle(s) { NOTE.paper = (s && s.paper) || '#ffe45c'; NOTE.ink = (s && s.ink) || '#17141f'; }
+// { paper, ink, font (CSS family list), weight, tape (false hides it), band (a stripe colour across
+//   the top), label (family for name tags), labelBg (tag background) }
+const NOTE_DEFAULT = { paper: '#ffe45c', ink: '#17141f', font: null, weight: '', tape: true, band: null, label: null, labelBg: null };
+const NOTE = { ...NOTE_DEFAULT };
+export function setNoteStyle(s) { Object.assign(NOTE, NOTE_DEFAULT, s || {}); }
+// font for name tags and other small labels drawn in the 3D view
+export const labelFont = (weight, px) => `${weight} ${px}px ${NOTE.label || '"Atkinson Hyperlegible", system-ui, sans-serif'}`;
+export const labelBg = (alpha) => NOTE.labelBg || `rgba(20,16,32,${alpha})`;
 
 export function noteTexture(text, opts = {}) {
   const c = document.createElement('canvas');
@@ -231,13 +237,24 @@ export function drawNote(g, text, opts = {}) {
   const grd = g.createLinearGradient(0, 0, 0, h);
   grd.addColorStop(0, 'rgba(255,255,255,0.25)'); grd.addColorStop(1, 'rgba(0,0,0,0.10)');
   g.fillStyle = grd; g.fillRect(0, 0, w, h);
-  g.fillStyle = 'rgba(255,255,255,0.55)';
-  g.save(); g.translate(w / 2, 6); g.rotate(-0.04); g.fillRect(-46, -10, 92, 22); g.restore();
+  if (NOTE.tape) {
+    g.fillStyle = 'rgba(255,255,255,0.55)';
+    g.save(); g.translate(w / 2, 6); g.rotate(-0.04); g.fillRect(-46, -10, 92, 22); g.restore();
+  }
+  if (NOTE.band) { g.fillStyle = NOTE.band; g.fillRect(0, 0, w, Math.round(h * 0.09)); }
   g.fillStyle = opts.ink || NOTE.ink;
   const len = String(text).length;
-  const size = len <= 3 ? 118 : len === 4 ? 104 : len === 5 ? 86 : 70;
-  g.font = `${size}px "Permanent Marker", "Marker Felt", "Comic Sans MS", cursive`;
+  let size = len <= 3 ? 118 : len === 4 ? 104 : len === 5 ? 86 : 70;
   g.textAlign = 'center'; g.textBaseline = 'middle';
+  if (NOTE.font) {
+    // a themed typeface: shrink until the number fits the note
+    const face = (sz) => `${NOTE.weight ? NOTE.weight + ' ' : ''}${sz}px ${NOTE.font}`;
+    g.font = face(size);
+    while (size > 30 && g.measureText(String(text)).width > w * 0.88) { size -= 4; g.font = face(size); }
+    g.fillText(String(text), w / 2, h / 2 + 8);
+    return;
+  }
+  g.font = `${size}px "Permanent Marker", "Marker Felt", "Comic Sans MS", cursive`;
   g.fillText(String(text), w / 2, h / 2 + 10);
 }
 
@@ -425,15 +442,18 @@ function fitText(g, text, maxW, size, family, weight = '') {
   return s;
 }
 
-function drawPrinted(g, d, x, y, pw, ph, img) {
-  const DISPLAY = '"Dela Gothic One", Impact, sans-serif', BODY = '"Atkinson Hyperlegible", system-ui, sans-serif';
+// map.printFonts: { display, displayWeight, body, bodyWeight } (CSS family lists) for the words on signs
+function drawPrinted(g, d, x, y, pw, ph, img, F = {}) {
+  const DISPLAY = F.display || '"Dela Gothic One", Impact, sans-serif', BODY = F.body || '"Atkinson Hyperlegible", system-ui, sans-serif';
+  const DW = F.displayWeight ? F.displayWeight + ' ' : '', BW = (F.bodyWeight || '700') + ' ';
   const pad = Math.round(Math.min(pw, ph) * 0.12);
   g.save();
   g.translate(x, y);
   if (d.bg) {
     g.globalAlpha = d.alpha ?? 1;
     g.fillStyle = d.bg;
-    roundRect(g, 0, 0, pw, ph, Math.min(pw, ph) * (d.type === 'image' ? 0.12 : 0.18));
+    // radius: a fraction of the shorter side (0.5 makes a pill)
+    roundRect(g, 0, 0, pw, ph, Math.min(pw, ph) * (d.radius ?? (d.type === 'image' ? 0.12 : 0.18)));
     g.fill();
     g.globalAlpha = 1;
   }
@@ -447,25 +467,26 @@ function drawPrinted(g, d, x, y, pw, ph, img) {
     return;
   }
   // icon on the left, then the words
-  let tx = pad;
+  let tx = d.radius >= 0.4 ? pad * 2.2 : pad; // pills keep the words clear of the round ends
   if (img && img.complete && img.naturalWidth) {
     const ih = ph - pad * 2, iw = ih * img.naturalWidth / img.naturalHeight;
-    g.drawImage(img, pad, pad, iw, ih);
-    tx = pad * 1.6 + iw;
+    g.drawImage(img, tx === pad ? pad : pad * 1.4, pad, iw, ih);
+    tx = (tx === pad ? pad : pad * 1.4) + iw + pad * 0.6;
   }
-  const maxW = pw - tx - pad;
+  const endPad = d.radius >= 0.4 ? pad * 2.2 : pad;
+  const maxW = pw - tx - endPad;
   const cx = tx + maxW / 2;
   g.fillStyle = d.ink || '#ffffff';
   g.textAlign = 'center'; g.textBaseline = 'middle';
   if (d.sub) {
-    fitText(g, d.text, maxW, Math.round(ph * 0.42), DISPLAY);
+    fitText(g, d.text, maxW, Math.round(ph * 0.42), DISPLAY, DW);
     g.fillText(d.text, cx, ph * 0.4);
     g.globalAlpha = 0.8;
-    fitText(g, d.sub, maxW, Math.round(ph * 0.2), BODY, '700 ');
+    fitText(g, d.sub, maxW, Math.round(ph * 0.2), BODY, BW);
     g.fillText(d.sub, cx, ph * 0.76);
     g.globalAlpha = 1;
   } else {
-    fitText(g, d.text, maxW, Math.round(ph * 0.55), DISPLAY);
+    fitText(g, d.text, maxW, Math.round(ph * 0.55), DISPLAY, DW);
     g.fillText(d.text, cx, ph * 0.53);
   }
   g.restore();
@@ -485,7 +506,7 @@ function printedDecor(map, quality) {
       const w = d.w || 4, h = d.type === 'floor' ? (d.d || 4) : (d.h || 1.2);
       const k = Math.min(ppm, 512 / Math.max(w, h));
       const pw = Math.max(16, Math.round(w * k)), ph = Math.max(16, Math.round(h * k));
-      const key = [d.type === 'floor' ? 'f' : 'u', d.text, d.sub, d.image, d.bg, d.ink, d.alpha, pw, ph].join('|');
+      const key = [d.type === 'floor' ? 'f' : 'u', d.text, d.sub, d.image, d.bg, d.ink, d.alpha, d.radius, pw, ph].join('|');
       let slot = uniq.get(key);
       if (!slot) {
         if (x + pw + PAD > AW) { x = 0; y += rowH + PAD; rowH = 0; }
@@ -501,7 +522,7 @@ function printedDecor(map, quality) {
   }
   const c = document.createElement('canvas'); c.width = AW; c.height = AH;
   const g = c.getContext('2d');
-  for (const s of uniq.values()) drawPrinted(g, s.d, s.x, s.y, s.pw, s.ph, s.d.image ? map.images && map.images[s.d.image] : null);
+  for (const s of uniq.values()) drawPrinted(g, s.d, s.x, s.y, s.pw, s.ph, s.d.image ? map.images && map.images[s.d.image] : null, map.printFonts);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 8;

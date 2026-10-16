@@ -8,6 +8,7 @@
 //     secret: 'word',                 // optional: map stays hidden until this is typed on the home screen
 //     images: { logo: 'data:...' },   // optional: pictures the map and theme can use by name
 //     map: { id, name, blurb, swatch, build: (kit) => mapDefinition },
+//     fonts: ['600 16px "My Font"'],  // optional: faces (declared with @font-face in theme.css) to load first
 //     theme: { css, note, lingo, champion, bots },   // optional: see lingo.js and theme.js
 //   });
 //
@@ -48,14 +49,25 @@ function registerPack(p) {
   };
   MAP_LIST.push({ id: mapId, name: p.map.name || mapId, blurb: p.map.blurb || '', swatch: p.map.swatch, pack: p.id, secret: !!p.secret });
   PACKS.set(p.id, { ...p, mapId });
+  // the theme's CSS is scoped to :root.theme-<id>, so it can go in straight away (its fonts too)
+  const css = p.theme && p.theme.css;
+  if (css && typeof document !== 'undefined' && !document.getElementById('pack-css-' + p.id)) {
+    const el = document.createElement('style');
+    el.id = 'pack-css-' + p.id;
+    el.textContent = css;
+    document.head.append(el);
+  }
 }
 
-// Resolve once every pack picture has decoded (or after `ms`), so scenery can draw them.
-export function packImagesReady(ms = 2000) {
-  const imgs = Object.values(imageCache);
-  if (!imgs.length) return Promise.resolve();
-  const all = Promise.all(imgs.map(img => (img.decode ? img.decode().catch(() => {}) : Promise.resolve())));
-  return Promise.race([all, new Promise(r => setTimeout(r, ms))]);
+// Resolve once every pack picture and font is ready (or after `ms`), so scenery and the
+// numbers on people's heads are drawn with them.
+export function packImagesReady(ms = 2500) {
+  const waits = Object.values(imageCache).map(img => (img.decode ? img.decode().catch(() => {}) : Promise.resolve()));
+  if (typeof document !== 'undefined' && document.fonts) {
+    for (const p of PACKS.values()) for (const f of p.fonts || []) waits.push(document.fonts.load(f).catch(() => {}));
+  }
+  if (!waits.length) return Promise.resolve();
+  return Promise.race([Promise.all(waits), new Promise(r => setTimeout(r, ms))]);
 }
 
 export function packForMap(mapId) {

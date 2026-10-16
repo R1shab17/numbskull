@@ -1,7 +1,7 @@
 // The cute little characters with a sticky note on their forehead.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { noteTexture, drawNote, makeFlagMesh } from './scene.js';
+import { noteTexture, drawNote, makeFlagMesh, labelFont, labelBg } from './scene.js';
 import { TEAM_COLOR } from './config.js';
 
 const toon = (() => {
@@ -151,9 +151,9 @@ function hatMesh(type) {
 function nameSprite(name, color) {
   const c = document.createElement('canvas'); c.width = 256; c.height = 64;
   const g = c.getContext('2d');
-  g.font = '600 30px "Atkinson Hyperlegible", system-ui, sans-serif';
+  g.font = labelFont(600, 30);
   const w = Math.min(250, g.measureText(name).width + 28);
-  g.fillStyle = 'rgba(20,16,32,0.72)';
+  g.fillStyle = labelBg(0.72);
   g.beginPath(); g.roundRect((256 - w) / 2, 8, w, 46, 12); g.fill();
   g.fillStyle = color; g.textAlign = 'center'; g.textBaseline = 'middle';
   g.fillText(name, 128, 32);
@@ -390,9 +390,9 @@ export class Avatar {
     this._specKey = key;
     const c = this.specTag.material.map.image, g = c.getContext('2d');
     g.clearRect(0, 0, c.width, c.height);
-    g.font = '700 30px "Atkinson Hyperlegible", system-ui, sans-serif';
+    g.font = labelFont(700, 30);
     const w = Math.min(c.width - 4, g.measureText(text).width + 30);
-    g.fillStyle = 'rgba(20,16,32,0.8)';
+    g.fillStyle = labelBg(0.8);
     g.beginPath(); g.roundRect((c.width - w) / 2, 8, w, 54, 14); g.fill();
     g.fillStyle = color || '#ffe45c'; g.textAlign = 'center'; g.textBaseline = 'middle';
     g.fillText(text, c.width / 2, 36);

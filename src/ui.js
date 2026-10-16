@@ -94,13 +94,14 @@ export class UI {
     this.cur = name;
     this.data = data;
     this.showMenu(true);
+    // a themed map's look and words apply before the screen is drawn
+    this.app.refreshTheme?.();
     this.root.innerHTML = this['s_' + name](data);
     this.root.scrollTop = 0;
     this['b_' + name]?.(data);
     $$('button', this.root).forEach(b => b.addEventListener('click', () => audio.ui()));
     const first = $('[autofocus]', this.root);
     if (first && !matchMedia('(pointer: coarse)').matches) first.focus();
-    this.app.refreshTheme?.();
   }
 
   head(title, back = 'home') {
