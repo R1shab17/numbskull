@@ -73,6 +73,29 @@ const errText = (e) => {
   return (e && e.message) || 'Connection problem.';
 };
 
+// Notes which kinds of route each side found while connecting ('host' = same network,
+// 'srflx' = public address, 'relay' = through a relay), so a failure can say whose network
+// is in the way. A side that reached a relay proves the relays are up.
+function watchRoutes(pc) {
+  const r = { mine: new Set(), theirs: new Set(), relayErrors: [] };
+  if (!pc) return r;
+  const kind = (c) => (/ typ (\w+)/.exec((c && c.candidate) || '') || [])[1];
+  pc.addEventListener('icecandidate', (e) => { const k = kind(e.candidate); if (k) r.mine.add(k); });
+  pc.addEventListener('icecandidateerror', (e) => { if (/^turns?:/.test(e.url || '')) r.relayErrors.push(`${e.url} ${e.errorCode} ${e.errorText || ''}`.trim()); });
+  // the host's routes arrive through the matchmaking server and PeerJS hands each to addIceCandidate
+  const add = pc.addIceCandidate;
+  pc.addIceCandidate = function (c, ...rest) { const k = kind(c); if (k) r.theirs.add(k); return add.call(this, c, ...rest); };
+  return r;
+}
+
+function p2pText(r) {
+  const meRelay = r.mine.has('relay'), hostRelay = r.theirs.has('relay'), hostKnown = r.theirs.size > 0;
+  if (!meRelay && hostRelay) return "Found the room, but your browser couldn't connect to the host's directly, and your network wouldn't let it reach a relay server either. Office, school and some mobile networks block this. Switch to a different network, such as a phone hotspot, and try again.";
+  if (meRelay && hostKnown && !hostRelay) return "Found the room, but your browser couldn't connect to the host's directly, and the host's network wouldn't let their browser reach a relay server either. Ask the host to switch to a different network, such as a phone hotspot, or have someone else host.";
+  if (!meRelay && hostKnown) return "Found the room, but your browser and the host's couldn't connect directly, and neither could reach a relay server to go through instead. Both networks may block this (common on office and school Wi-Fi), or the free relays may be down. One of you try a different network, such as a phone hotspot, or try again later.";
+  return errText({ type: 'p2p' });
+}
+
 // Problems with the matchmaking (signalling) server. It's only needed to introduce
 // browsers to each other, so once a room is open these never end a match.
 const SIGNAL = new Set(['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected']);
@@ -121,8 +144,10 @@ export class HostNet {
     peer.on('connection', (conn) => {
       conn.on('open', () => { this.conns.set(conn.peer, conn); this.h.onConnect?.(conn); });
       conn.on('data', (d) => this.h.onData?.(conn, decode(d)));
-      conn.on('close', () => { this.conns.delete(conn.peer); this.h.onClose?.(conn); });
-      conn.on('error', () => { this.conns.delete(conn.peer); this.h.onClose?.(conn); });
+      // a player's failed first try can close after their retry got in: don't drop the retry
+      const drop = () => { if (this.conns.get(conn.peer) === conn) this.conns.delete(conn.peer); this.h.onClose?.(conn); };
+      conn.on('close', drop);
+      conn.on('error', drop);
     });
   }
 
@@ -185,6 +210,7 @@ export class ClientNet {
     // has the host's browser answered? (if so, any failure is the route between us, not the host)
     let answered = false;
     conn.on('iceStateChanged', (st) => { if (st !== 'new') answered = true; });
+    const routes = watchRoutes(conn.peerConnection);
     const giveUp = () => {
       if (this.conn !== conn || this.connected || this.closed) return;
       clearTimeout(wait);
@@ -192,7 +218,8 @@ export class ClientNet {
       try { conn.close(); } catch { /* ignore */ }
       // the room exists but the link never opened: try once more, then explain
       if (n < 2 && !this.fullId && !peer.destroyed) { this.dial(peer, n + 1); return; } // quick play moves on instead
-      this.fail(errText({ type: answered ? 'p2p' : 'noanswer' }), 'timeout');
+      if (answered) console.warn(`Numbskull: no route to the host. Your routes: ${[...routes.mine].join(', ') || 'none'}. Host's routes: ${[...routes.theirs].join(', ') || 'none'}. Relay errors: ${routes.relayErrors.join('; ') || 'none'}.`);
+      this.fail(answered ? p2pText(routes) : errText({ type: 'noanswer' }), 'timeout');
     };
     const wait = setTimeout(giveUp, n === 1 ? this.timeoutMs : Math.max(8000, this.timeoutMs * 0.6));
     conn.on('open', () => {

@@ -131,7 +131,7 @@ Online rooms are peer-to-peer. The host's browser runs the match (bots, rules an
 - A host keeps the match running even if they switch to another tab.
 - If the host of a private room leaves, the room closes. If a player's connection drops, their browser reconnects by itself and they get their place and name back.
 - The matchmaking server is only needed to introduce browsers. If it drops out, matches carry on and the host reconnects in the background; only new joins wait for it.
-- When two networks won't connect directly, traffic goes through a free public relay (PeerJS's own, with [Metered's Open Relay Project](https://www.metered.ca/tools/openrelay/) as a backup). A few very strict networks (some offices and schools) block even that.
+- When two networks won't connect directly, traffic goes through a free public relay (PeerJS's own, with [Metered's Open Relay Project](https://www.metered.ca/tools/openrelay/) as a backup). A few very strict networks (some offices and schools) block even that. When a join fails this way, the message says whose network couldn't reach a relay, so the right person can switch to another network (a phone hotspot works).
 - Online rooms don't work when the game is embedded somewhere that blocks WebRTC. Hosting the page yourself avoids that.
 
 To add your own relay (TURN server), set this before the game script. It's tried first:
