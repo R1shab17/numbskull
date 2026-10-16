@@ -13,9 +13,10 @@ const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 
 // How browsers find a route to each other. Most pairs connect directly (STUN tells each
 // browser its public address). When a network blocks that, traffic goes through a relay
-// (TURN). Numbskull's own relay (a Metered account) is tried first once its login is filled
-// in: it also answers on ports 80 and 443, which strict office and school networks usually
-// leave open. Browsers need the login to use it, so anyone can read it from the page. Two
+// (TURN). In private rooms, Numbskull's own relay (a Metered account) is tried first once its
+// login is filled in: it also answers on ports 80 and 443, which strict office and school
+// networks usually leave open. Its monthly allowance is small, so public rooms don't use it.
+// Browsers need the login to use it, so anyone can read it from the page. Two
 // free public relays back it up: PeerJS's own, and Metered's Open Relay Project, whose shared
 // secret is published for public use and turned into short-lived credentials below. A page
 // can add its own relay first with window.NUMBSKULL_ICE = [{ urls, username, credential }, ...].
@@ -35,15 +36,16 @@ async function makeOpenRelay() {
 }
 try { if (globalThis.crypto && crypto.subtle) makeOpenRelay().then((r) => { openRelay = r; }, () => {}); } catch { /* no WebCrypto: PeerJS's relay only */ }
 
-function iceServers() {
+// own: include Numbskull's own relay (private rooms only)
+function iceServers(own) {
   let extra = [];
   try { if (Array.isArray(window.NUMBSKULL_ICE)) extra = window.NUMBSKULL_ICE.filter(x => x && x.urls); } catch { /* ignore */ }
-  return [...extra, STUN, ...RELAY, PEERJS_TURN, ...(openRelay ? [openRelay] : [])];
+  return [...extra, STUN, ...(own ? RELAY : []), PEERJS_TURN, ...(openRelay ? [openRelay] : [])];
 }
 
 // Optional self-hosted signalling server: ?signal=https://your-peer-server.example/path
-function peerOptions() {
-  const o = { debug: 0, config: { iceServers: iceServers(), sdpSemantics: 'unified-plan' } };
+function peerOptions(own) {
+  const o = { debug: 0, config: { iceServers: iceServers(own), sdpSemantics: 'unified-plan' } };
   let sig = null;
   try { sig = new URLSearchParams(location.search).get('signal'); } catch { /* no query string */ }
   sig = sig || window.NUMBSKULL_SIGNAL;
@@ -115,7 +117,7 @@ export class HostNet {
     this.code = code; this.fullId = fullId;
     this.attempt++;
     let peer;
-    try { peer = this.peer = new Peer(fullId || PREFIX + code, peerOptions()); }
+    try { peer = this.peer = new Peer(fullId || PREFIX + code, peerOptions(!fullId)); }
     catch (e) { this.h.onError?.(errText(e)); return; }
     // the matchmaking server is sometimes slow to answer: start again rather than hang
     const slow = setTimeout(() => { if (this.peer === peer && !this.ready) this.retryOpen(peer); }, OPEN_WAIT);
@@ -192,7 +194,7 @@ export class ClientNet {
     this.code = code; this.fullId = fullId; this.timeoutMs = timeoutMs;
     this.attempt++;
     let peer;
-    try { peer = this.peer = new Peer(peerOptions()); }
+    try { peer = this.peer = new Peer(peerOptions(!fullId)); }
     catch (e) { this.h.onError?.(errText(e)); return; }
     const slow = setTimeout(() => { if (this.peer === peer && !peer.open) this.retryOpen(peer); }, OPEN_WAIT);
     peer.on('open', () => {
