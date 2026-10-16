@@ -339,7 +339,7 @@ export class Hud {
     const god = view.mode === 'spec-god';
     put(E.specLbl, 'textContent', info.watching ? (god ? 'Watching · god view' : 'Watching') : info.late ? 'Next round soon · spectating' : god ? 'God view' : 'Spectating');
     hide(E.specJoin, !info.canJoin);
-    const name = god ? `${game.aliveCount()} left` : t ? t.name : 'nobody';
+    const name = god ? `${game.aliveCount()} ${game.br ? 'left' : 'playing'}` : t ? t.name : 'nobody';
     if (E.specName.textContent !== name) E.specName.textContent = name;
     const inf = god ? 'Click a player to follow them' : t ? `${t.num} · ${t.kills} out · ${'■'.repeat(t.notes || 1)} ${t.notes > 1 ? 'notes' : 'note'}` : '';
     if (E.specInfo.textContent !== inf) E.specInfo.textContent = inf;
