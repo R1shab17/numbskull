@@ -2,9 +2,11 @@
 import * as THREE from 'three';
 import { MODES, DIFFICULTY, SHIRT_COLORS, SKIN_TONES, HATS, HAT_LABEL, TEAM_NAME, MAX_PLAYERS, VERSION, GADGET_LABEL } from './config.js';
 import { MAP_LIST } from './maps.js';
+import { pickableMaps, secretWords, unlockPack } from './packs.js';
 import { Avatar } from './avatar.js';
 import { audio } from './audio.js';
 import { esc } from './hud.js';
+import { say } from './lingo.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -48,6 +50,35 @@ export class UI {
     this.cur = null;
     $('#ver').textContent = 'v' + VERSION;
     this.toastEl = $('#toast');
+    this.listenForSecrets();
+  }
+
+  // Secret maps: type the pack's word on the home screen (or tap the title 7 times on a phone).
+  listenForSecrets() {
+    let typed = '';
+    addEventListener('keydown', (e) => {
+      if (this.cur !== 'home' || this.menu.hidden || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+      if (!/^[a-z0-9]$/i.test(e.key)) return;
+      typed = (typed + e.key.toLowerCase()).slice(-32);
+      for (const s of secretWords()) if (typed.endsWith(s.word)) { typed = ''; this.unlock([s.pack]); }
+    });
+    let taps = 0, tapT = 0;
+    this.root.addEventListener('click', (e) => {
+      if (this.cur !== 'home' || !e.target.closest('.logo')) return;
+      const now = performance.now();
+      taps = now - tapT < 1500 ? taps + 1 : 1;
+      tapT = now;
+      if (taps >= 7) { taps = 0; const packs = secretWords().map(s => s.pack); if (packs.length) this.unlock(packs); }
+    });
+  }
+
+  unlock(packs) {
+    const fresh = packs.filter(p => unlockPack(p));
+    const names = packs.map(p => p.map.name || p.id).join(', ');
+    audio.init();
+    if (fresh.length) { audio.capture(true); this.toast(`Secret map unlocked: ${names}. Pick it under Play vs bots or Host a private room.`, 6000); }
+    else { audio.pickup(); this.toast(`${names} is already unlocked. Find it in the map list.`, 3500); }
   }
 
   toast(msg, ms = 2600) {
@@ -69,6 +100,7 @@ export class UI {
     $$('button', this.root).forEach(b => b.addEventListener('click', () => audio.ui()));
     const first = $('[autofocus]', this.root);
     if (first && !matchMedia('(pointer: coarse)').matches) first.focus();
+    this.app.refreshTheme?.();
   }
 
   head(title, back = 'home') {
@@ -139,7 +171,7 @@ export class UI {
     if (M.lives == null) M.lives = 2;
     const isHost = kind !== 'solo';
     const modeCards = Object.values(MODES).map(m => `<button class="card" data-mode="${m.id}" aria-pressed="${m.id === M.mode}"><b>${m.name}</b><span>${m.blurb}</span></button>`).join('');
-    const mapCards = MAP_LIST.map(m => `<button class="card" data-map="${m.id}" aria-pressed="${m.id === M.mapId}"><div class="swatchmap" style="background:${MAP_COLORS[m.id]}"></div><b>${m.name}</b><span>${m.blurb}</span></button>`).join('');
+    const mapCards = pickableMaps().map(m => `<button class="card${m.secret ? ' secret' : ''}" data-map="${m.id}" aria-pressed="${m.id === M.mapId}"><div class="swatchmap" style="background:${m.swatch || MAP_COLORS[m.id] || '#888'}"></div><b>${esc(m.name)}</b><span>${esc(m.blurb)}</span></button>`).join('');
     const seg = (key, opts, label) => `<div class="field"><span class="lbl">${label}</span><div class="seg" data-seg="${key}">${opts.map(([v, t]) => `<button data-v="${v}" aria-pressed="${String(M[key]) === String(v)}">${t}</button>`).join('')}</div></div>`;
     return `<section class="screen setup">
       ${this.head(kind === 'hostEdit' ? 'Room settings' : isHost ? 'Host a room' : 'Play vs bots', kind === 'hostEdit' ? 'lobby' : 'home')}
@@ -190,6 +222,8 @@ export class UI {
       M.mapId = b.dataset.map;
       $$('[data-map]', this.root).forEach(x => x.setAttribute('aria-pressed', x === b));
       this.app.saveMatch();
+      // a themed map changes the words on this screen too
+      if (this.app.refreshTheme()) this.go('setup', { kind });
     }));
     $$('[data-seg]', this.root).forEach(seg => {
       const key = seg.dataset.seg;
@@ -220,8 +254,9 @@ export class UI {
         <form id="jForm" class="field">
           <label class="lbl" for="jCode">Room code</label>
           <input id="jCode" class="codein" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" style="font-family:var(--f-display);font-size:2rem;letter-spacing:.2em;text-transform:uppercase" autofocus>
-          <div class="startrow"><button class="btn big go" type="submit" id="jGo">Join</button><span id="jMsg" style="font-weight:700"></span></div>
+          <div class="startrow"><button class="btn big go" type="submit" id="jGo">Join</button><button class="btn big alt" type="button" id="jWatch">Watch</button><span id="jMsg" style="font-weight:700"></span></div>
         </form>
+        <p style="font-size:.88rem;margin-top:4px"><b>Watch</b> joins as a spectator: follow any player or look down on the whole map, and jump in to play whenever you like.</p>
         <p style="font-size:.88rem;margin-top:8px">Online rooms connect browsers directly to each other. Most home networks work. Some strict office or school networks block it.</p>
       </div>
     </section>`;
@@ -230,15 +265,16 @@ export class UI {
     this.bindBack();
     const inp = $('#jCode');
     inp.addEventListener('input', () => { inp.value = inp.value.toUpperCase().replace(/[^A-Z]/g, ''); });
-    $('#jForm').addEventListener('submit', (e) => {
-      e.preventDefault();
+    const go = (watch) => {
       if (inp.value.length !== 4) { $('#jMsg').textContent = 'Codes are 4 letters.'; return; }
       $('#jMsg').textContent = 'Connecting…';
-      $('#jGo').disabled = true;
-      this.app.joinRoom(inp.value);
-    });
+      $('#jGo').disabled = true; $('#jWatch').disabled = true;
+      this.app.joinRoom(inp.value, watch);
+    };
+    $('#jForm').addEventListener('submit', (e) => { e.preventDefault(); go(false); });
+    $('#jWatch').addEventListener('click', () => go(true));
   }
-  joinError(msg) { if (this.cur === 'join') { $('#jMsg').textContent = msg; $('#jGo').disabled = false; } else { this.go('join'); setTimeout(() => this.joinError(msg), 0); } }
+  joinError(msg) { if (this.cur === 'join') { $('#jMsg').textContent = msg; $('#jGo').disabled = false; $('#jWatch').disabled = false; } else { this.go('join'); setTimeout(() => this.joinError(msg), 0); } }
 
   // ---------------------------------------------------------------- lobby
   s_lobby(d) {
@@ -246,7 +282,10 @@ export class UI {
     const M = d.settings || this.app.match;
     const players = d.players || [];
     const teams = MODES[M.mode].teams;
-    const list = players.map(p => `<li><span class="dot" style="background:${p.shirt}"></span><span class="nm">${esc(p.name)}</span>${p.id === d.you ? '<span class="tag">You</span>' : ''}${p.host ? '<span class="tag">Host</span>' : ''}</li>`).join('');
+    const list = players.map(p => `<li class="${p.watch ? 'watching' : ''}"><span class="dot" style="background:${p.shirt}"></span><span class="nm">${esc(p.name)}</span>${p.watch ? '<span class="tag watch">Watching</span>' : ''}${p.id === d.you ? '<span class="tag">You</span>' : ''}${p.host ? '<span class="tag">Host</span>' : ''}</li>`).join('');
+    const playing = players.filter(p => !p.watch).length, watching = players.length - playing;
+    const meWatch = !!players.find(p => p.id === d.you)?.watch;
+    const mapName = d.publicRoom ? 'a random map' : MAP_LIST.find(m => m.id === M.mapId)?.name || 'a map from another copy of the game';
     return `<section class="screen setup">
       ${this.head(isHost ? 'Your room' : 'Room ' + esc(d.code), isHost ? 'closeRoom' : 'leaveRoom')}
       <div class="note" style="--tilt:-1deg">
@@ -254,12 +293,13 @@ export class UI {
         <div class="roomcode" id="lCode">${esc(d.code || '····')}</div>
         <div class="startrow"><button class="btn alt" id="lCopy">Copy code</button></div>
         <p style="margin-top:12px">Friends pick <b>Join a room</b> and type this code. They can also join while a match is running.</p>
-        <p style="font-size:.9rem"><b>${MODES[M.mode].name}</b> on <b>${esc(d.publicRoom ? 'a random map' : MAP_LIST.find(m => m.id === M.mapId)?.name || '')}</b> · ${M.digits}-digit numbers · ${DIFFICULTY[M.difficulty]?.name || ''} bots${M.mode === 'br' ? ` · ${M.lives || 2} notes each` : ''}${teams ? ' · teams are balanced at the start' : ''}</p>
+        <p style="font-size:.9rem"><b>${MODES[M.mode].name}</b> on <b>${esc(mapName)}</b> · ${M.digits}-digit numbers · ${DIFFICULTY[M.difficulty]?.name || ''} bots${M.mode === 'br' ? ` · ${M.lives || 2} notes each` : ''}${teams ? ' · teams are balanced at the start' : ''}</p>
         ${d.countdown != null ? `<p style="font-weight:700">Next round starts in <span id="lCount">${d.countdown}</span>s</p>` : ''}
       </div>
       <div class="note mint" style="--tilt:.8deg">
-        <h2>Players <small style="font-family:var(--f-body);font-size:.9rem">${players.length}/${MAX_PLAYERS}</small></h2>
+        <h2>Players <small style="font-family:var(--f-body);font-size:.9rem">${playing}/${MAX_PLAYERS}${watching ? ` · ${watching} watching` : ''}</small></h2>
         <ul class="plist">${list}</ul>
+        <div class="startrow"><button class="btn alt" id="lWatch">${meWatch ? 'Play instead' : 'Just watch'}</button><span style="font-size:.85rem">${meWatch ? "You're watching. You can jump in during the match." : 'Watchers follow any player or see the whole map from above.'}</span></div>
         ${isHost ? `<div class="field" style="margin-top:14px"><span class="lbl">Bots</span><div class="stepper"><button id="lbMinus" aria-label="Fewer bots">−</button><output id="lbN">${M.bots}</output><button id="lbPlus" aria-label="More bots">+</button></div></div>
         <div class="startrow"><button class="btn big go" id="lStart">Start match</button><button class="btn ghost" id="lSettings">Change settings</button></div>`
         : `<p style="margin-top:14px;font-weight:700">Waiting for the host to start…</p>`}
@@ -268,6 +308,8 @@ export class UI {
   }
   b_lobby(d) {
     this.bindBack();
+    const meWatch = !!(d.players || []).find(p => p.id === d.you)?.watch;
+    $('#lWatch').addEventListener('click', () => this.app.session?.setWatch?.(!meWatch));
     $('#lCopy').addEventListener('click', () => {
       const code = d.code;
       const done = () => this.toast('Room code copied');
@@ -338,6 +380,7 @@ export class UI {
         <p>The pink zone keeps shrinking. Stay outside it for more than a few seconds and you're out too. The dotted circle on the map shows where it closes to next.</p>
         <p>Once you're out you can spectate. Follow any player with <kbd>←</kbd> <kbd>→</kbd>, or press <kbd>V</kbd> for the god view from above (drag or WASD to pan, wheel to zoom, click a player to follow them).</p>
         <p><b>Play online</b> drops you into a public Battle Royale room with whoever else is playing. Rounds start back to back and bots fill the empty spots.</p>
+        <p>In a private room you can also just watch, in any mode: press <b>Watch</b> on the join screen or <b>Just watch</b> in the room, then <b>Jump in</b> when you want to play.</p>
       </div>
       <div class="note mint" style="--tilt:1deg">
         <h2>Modes</h2>
@@ -411,28 +454,34 @@ export class UI {
   // ---------------------------------------------------------------- end
   s_end(d) {
     const R = d.results, me = d.you;
-    let title, sub;
+    let title, sub, champ = null;
     if (R.teams) {
-      title = R.winner ? `${TEAM_NAME[R.winner]} team wins` : 'Draw';
+      title = R.winner ? say('endTeamWins', { team: TEAM_NAME[R.winner] }) : say('endDraw');
       const mine = R.players.find(p => p.id === me);
-      sub = mine && R.winner ? (mine.team === R.winner ? 'Nice reading.' : 'They had your number.') : `${R.teamScore[1]} – ${R.teamScore[2]}`;
-      sub += ` · Red ${R.teamScore[1]}, Blue ${R.teamScore[2]}`;
+      sub = mine && R.winner ? say(mine.team === R.winner ? 'endTeamWinSub' : 'endTeamLoseSub') : `${R.teamScore[1]} – ${R.teamScore[2]}`;
+      sub += ` · ${TEAM_NAME[1]} ${R.teamScore[1]}, ${TEAM_NAME[2]} ${R.teamScore[2]}`;
+      if (R.winner) champ = say('championTeam', { team: TEAM_NAME[R.winner], title: say('champion') });
     } else if (R.br) {
       const w = R.players.find(p => p.id === R.winner);
       const mine = R.players.find(p => p.id === me);
-      title = w ? (w.id === me ? 'Last head standing' : `${esc(w.name)} wins`) : 'Nobody survived';
+      title = w ? (w.id === me ? say('endBrYou') : say('endWins', { name: w.name })) : 'Nobody survived';
       sub = mine && mine.place ? (mine.place === 1 ? 'Nobody could read you.' : `You came #${mine.place} of ${R.players.filter(p => p.place).length}.`) : 'You watched this one.';
+      if (w) champ = w.id === me ? say('championYou', { title: say('champion') }) : say('championIs', { name: w.name, title: say('champion') });
     } else {
       const w = R.players.find(p => p.id === R.winner);
-      title = w ? (w.id === me ? 'You win' : `${esc(w.name)} wins`) : 'Draw';
-      sub = w && w.id === me ? 'Human calculator.' : 'Better luck next time.';
+      title = w ? (w.id === me ? say('endYouWin') : say('endWins', { name: w.name })) : say('endDraw');
+      sub = w && w.id === me ? say('endWinSub') : say('endLoseSub');
+      if (w) champ = w.id === me ? say('championYou', { title: say('champion') }) : say('championIs', { name: w.name, title: say('champion') });
     }
+    if (!R.players.some(p => p.id === me)) sub = 'You watched this one.';
+    // on a themed map the winner is crowned
+    if (champ && say('champion')) { sub = `${title}. ${sub}`; title = champ; }
     const sorted = R.br ? [...R.players].sort((a, b) => (a.place || 99) - (b.place || 99) || b.kills - a.kills) : [...R.players].sort((a, b) => (b.kills - a.kills) || (a.deaths - b.deaths));
-    const row = (p) => `<tr class="${p.id === me ? 'me' : ''}">${R.br ? `<td class="n">${p.place ? '#' + p.place : '–'}</td>` : ''}<td>${R.teams ? `<span class="tag ${p.team === 1 ? 'red' : 'blue'}">${TEAM_NAME[p.team]}</span> ` : ''}${esc(p.name)}${p.isBot ? ' <small style="opacity:.6">bot</small>' : ''}</td><td class="n">${p.kills}</td><td class="n">${p.deaths}</td>${d.ctf ? `<td class="n">${p.caps}</td>` : ''}<td class="n">${p.misses}</td><td class="n">${p.best}</td><td class="n">${p.fastest ? (p.fastest / 1000).toFixed(2) + 's' : '–'}</td></tr>`;
+    const row = (p) => `<tr class="${p.id === me ? 'me' : ''}">${R.br ? `<td class="n">${p.place ? '#' + p.place : '–'}</td>` : ''}<td>${R.teams ? `<span class="tag ${p.team === 1 ? 'red' : 'blue'}">${esc(TEAM_NAME[p.team])}</span> ` : ''}${esc(p.name)}${p.isBot ? ' <small style="opacity:.6">bot</small>' : ''}</td><td class="n">${p.kills}</td><td class="n">${p.deaths}</td>${d.ctf ? `<td class="n">${p.caps}</td>` : ''}<td class="n">${p.misses}</td><td class="n">${p.best}</td><td class="n">${p.fastest ? (p.fastest / 1000).toFixed(2) + 's' : '–'}</td></tr>`;
     return `<section class="screen" style="max-width:860px">
-      <div class="end-banner"><h2>${title}</h2><p>${esc(sub)}</p></div>
+      <div class="end-banner"><h2>${esc(title)}</h2><p>${esc(sub)}</p></div>
       <div class="note white" style="--tilt:-.4deg">
-        <div class="tablewrap"><table class="res"><tr>${R.br ? '<th class="n">Place</th>' : ''}<th>Player</th><th class="n">${R.br ? 'Out' : 'Reads'}</th><th class="n">Deaths</th>${d.ctf ? '<th class="n">Caps</th>' : ''}<th class="n">Misses</th><th class="n">Best streak</th><th class="n">Fastest read</th></tr>${sorted.map(row).join('')}</table></div>
+        <div class="tablewrap"><table class="res"><tr>${R.br ? '<th class="n">Place</th>' : ''}<th>Player</th><th class="n">${esc(say(R.br ? 'colOut' : 'colReads'))}</th><th class="n">${esc(say('colDeaths'))}</th>${d.ctf ? '<th class="n">Caps</th>' : ''}<th class="n">${esc(say('colMisses'))}</th><th class="n">${esc(say('colBest'))}</th><th class="n">${esc(say('colFastest'))}</th></tr>${sorted.map(row).join('')}</table></div>
         <div class="startrow" style="margin-top:14px">
           ${d.canRestart ? '<button class="btn big go" id="eAgain">Play again</button>' : d.publicRoom ? '<span style="font-weight:700">Next round starts in a few seconds…</span>' : '<span style="font-weight:700">Waiting for the host…</span>'}
           ${d.host ? '<button class="btn alt" id="eLobby">Back to room</button>' : ''}

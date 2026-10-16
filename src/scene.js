@@ -82,6 +82,26 @@ export function makeTextures() {
     g.strokeStyle = 'rgba(0,0,0,0.12)'; g.lineWidth = 2;
     for (let i = 0; i <= 4; i++) { g.beginPath(); g.moveTo(i * s / 4, 0); g.lineTo(i * s / 4, s); g.stroke(); g.beginPath(); g.moveTo(0, i * s / 4); g.lineTo(s, i * s / 4); g.stroke(); }
   });
+  // office curtain wall: two panes per tile, a floor band and a soft reflection
+  T.glass = canvasTex(128, (g, s) => {
+    g.fillStyle = '#ffffff'; g.fillRect(0, 0, s, s);
+    for (let i = 0; i < 2; i++) {
+      const x = i * 64;
+      const grd = g.createLinearGradient(x, 0, x + 64, s);
+      grd.addColorStop(0, 'rgba(255,255,255,0.0)'); grd.addColorStop(0.45, 'rgba(255,255,255,0.32)'); grd.addColorStop(0.5, 'rgba(255,255,255,0.05)'); grd.addColorStop(1, 'rgba(0,0,0,0.18)');
+      g.fillStyle = grd; g.fillRect(x + 5, 14, 54, s - 22);
+    }
+    g.fillStyle = 'rgba(255,255,255,0.75)'; g.fillRect(0, 0, s, 10);
+    g.fillStyle = 'rgba(0,0,0,0.22)'; g.fillRect(0, 10, s, 3);
+    g.fillStyle = 'rgba(255,255,255,0.6)'; g.fillRect(0, 0, 5, s); g.fillRect(61, 0, 6, s); g.fillRect(s - 5, 0, 5, s);
+  });
+  // large floor tiles
+  T.tiles = canvasTex(256, (g, s) => {
+    g.fillStyle = '#ffffff'; g.fillRect(0, 0, s, s);
+    noise(g, s, 0.035, rnd, 4);
+    g.strokeStyle = 'rgba(40,10,60,0.13)'; g.lineWidth = 3;
+    for (let i = 0; i <= 4; i++) { g.beginPath(); g.moveTo(i * s / 4, 0); g.lineTo(i * s / 4, s); g.stroke(); g.beginPath(); g.moveTo(0, i * s / 4); g.lineTo(s, i * s / 4); g.stroke(); }
+  });
   return T;
 }
 
@@ -97,7 +117,8 @@ function buildBoxes(map, T, quality) {
     const tint = 1 + (rnd() - 0.5) * 0.06;
     const r = col.r * tint, gg = col.g * tint, bb = col.b * tint;
     const x0 = b.x - b.w / 2, x1 = b.x + b.w / 2, y0 = b.y0, y1 = b.y0 + b.h, z0 = b.z - b.d / 2, z1 = b.z + b.d / 2;
-    const shelfS = kind === 'shelf' ? 1.2 : 1;
+    const shelfS = kind === 'shelf' ? 1.2 : kind === 'glass' ? 2 : 1;
+    const uS = kind === 'glass' ? 2 : 1;
     const faces = [
       // [normal], 4 corners (counter-clockwise from outside), uv axes
       [[1, 0, 0], [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], (p) => [-p[2], p[1]]],
@@ -118,7 +139,7 @@ function buildBoxes(map, T, quality) {
       }
       corners.forEach((p, k) => {
         g.pos.push(p[0], p[1], p[2]); g.nor.push(n[0], n[1], n[2]);
-        g.uv.push(uvs[k][0], uvs[k][1] / shelfS);
+        g.uv.push(uvs[k][0] / uS, uvs[k][1] / shelfS);
         g.col.push(r * shade, gg * shade, bb * shade);
       });
       g.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -141,13 +162,28 @@ function buildBoxes(map, T, quality) {
   return meshes;
 }
 
-function skyDome(top, horizon, night) {
+// sky: [top, horizon] or [top, middle, horizon]
+function skyDome(top, horizon, night, mid) {
+  if (mid) return skyDome3(top, mid, horizon);
   const geo = new THREE.SphereGeometry(450, 32, 16);
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false, fog: false,
     uniforms: { top: { value: new THREE.Color(top) }, hor: { value: new THREE.Color(horizon) } },
     vertexShader: 'varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
     fragmentShader: 'uniform vec3 top; uniform vec3 hor; varying vec3 vP; void main(){ float h = clamp(vP.y*1.6+0.05,0.0,1.0); gl_FragColor = vec4(mix(hor, top, pow(h,0.8)),1.0); }',
+  });
+  const m = new THREE.Mesh(geo, mat);
+  m.renderOrder = -10;
+  return m;
+}
+
+function skyDome3(top, mid, horizon) {
+  const geo = new THREE.SphereGeometry(450, 32, 16);
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { top: { value: new THREE.Color(top) }, mid: { value: new THREE.Color(mid) }, hor: { value: new THREE.Color(horizon) } },
+    vertexShader: 'varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+    fragmentShader: 'uniform vec3 top; uniform vec3 mid; uniform vec3 hor; varying vec3 vP; void main(){ float h = pow(clamp(vP.y*1.6+0.05,0.0,1.0),0.8); vec3 c = h < 0.42 ? mix(hor, mid, h/0.42) : mix(mid, top, (h-0.42)/0.58); gl_FragColor = vec4(c,1.0); }',
   });
   const m = new THREE.Mesh(geo, mat);
   m.renderOrder = -10;
@@ -171,6 +207,10 @@ function makeTree(rnd) {
   return g;
 }
 
+// Default look of the sticky notes on everyone's heads (a map pack's theme can change it).
+const NOTE = { paper: '#ffe45c', ink: '#17141f' };
+export function setNoteStyle(s) { NOTE.paper = (s && s.paper) || '#ffe45c'; NOTE.ink = (s && s.ink) || '#17141f'; }
+
 export function noteTexture(text, opts = {}) {
   const c = document.createElement('canvas');
   c.width = 256; c.height = 160;
@@ -185,7 +225,7 @@ export function noteTexture(text, opts = {}) {
 export function drawNote(g, text, opts = {}) {
   const w = g.canvas.width, h = g.canvas.height;
   g.clearRect(0, 0, w, h);
-  g.fillStyle = opts.paper || '#ffe45c';
+  g.fillStyle = opts.paper || NOTE.paper;
   g.fillRect(0, 0, w, h);
   // paper shading + tape
   const grd = g.createLinearGradient(0, 0, 0, h);
@@ -193,7 +233,7 @@ export function drawNote(g, text, opts = {}) {
   g.fillStyle = grd; g.fillRect(0, 0, w, h);
   g.fillStyle = 'rgba(255,255,255,0.55)';
   g.save(); g.translate(w / 2, 6); g.rotate(-0.04); g.fillRect(-46, -10, 92, 22); g.restore();
-  g.fillStyle = opts.ink || '#17141f';
+  g.fillStyle = opts.ink || NOTE.ink;
   const len = String(text).length;
   const size = len <= 3 ? 118 : len === 4 ? 104 : len === 5 ? 86 : 70;
   g.font = `${size}px "Permanent Marker", "Marker Felt", "Comic Sans MS", cursive`;
@@ -264,6 +304,9 @@ function makeOutskirts(map, quality) {
   const skyTiles = [], skyMeshes = [];
   const rnd = seeded(map.id.length * 97 + 3);
   const hw = map.width / 2, hd = map.depth / 2;
+  const O = map.outskirts || {};
+  const style = O.style || (map.id === 'plaza' ? 'town' : map.id === 'depot' ? 'warehouses' : 'skyline');
+  const windows = O.windows || ['#ffd27a', '#ff9ad5', '#7af2ff', '#fff4c2'];
   const n = quality > 1 ? 70 : 40;
   for (let i = 0; i < n; i++) {
     const a = rnd() * Math.PI * 2;
@@ -271,7 +314,7 @@ function makeOutskirts(map, quality) {
     const x = Math.cos(a) * hw * dist + Math.sign(Math.cos(a)) * 8, z = Math.sin(a) * hd * dist + Math.sign(Math.sin(a)) * 8;
     if (Math.abs(x) < hw + 6 && Math.abs(z) < hd + 6) continue;
     let mesh;
-    if (map.id === 'plaza') {
+    if (style === 'town') {
       if (rnd() < 0.55) {
         mesh = makeTree(rnd); mesh.scale.setScalar(1.2 + rnd() * 1.4);
       } else {
@@ -283,17 +326,17 @@ function makeOutskirts(map, quality) {
         roof.position.y = h / 2 + 1.25; roof.rotation.y = Math.PI / 4;
         mesh.add(roof);
       }
-    } else if (map.id === 'depot') {
+    } else if (style === 'warehouses') {
       const h = 6 + rnd() * 10, w = 10 + rnd() * 14;
       mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, w * 0.6), new THREE.MeshLambertMaterial({ color: ['#8f9bb3', '#a7a2b8', '#c28f6e', '#7d8aa3'][Math.floor(rnd() * 4)] }));
       mesh.position.y = h / 2;
     } else {
-      const h = 14 + rnd() * 40, w = 7 + rnd() * 9;
+      const h = (14 + rnd() * 40) * (O.scale || 1), w = 7 + rnd() * 9;
       // the same random windows as always, but each tower's 64x128 pattern becomes one
       // layer of a texture array so every tower is drawn in a single call
       const c = document.createElement('canvas'); c.width = 64; c.height = 128;
-      const cg = c.getContext('2d'); cg.fillStyle = '#1d1638'; cg.fillRect(0, 0, 64, 128);
-      for (let yy = 4; yy < 128; yy += 10) for (let xx = 4; xx < 64; xx += 10) if (rnd() < 0.45) { cg.fillStyle = ['#ffd27a', '#ff9ad5', '#7af2ff', '#fff4c2'][Math.floor(rnd() * 4)]; cg.fillRect(xx, yy, 5, 6); }
+      const cg = c.getContext('2d'); cg.fillStyle = O.base || '#1d1638'; cg.fillRect(0, 0, 64, 128);
+      for (let yy = 4; yy < 128; yy += 10) for (let xx = 4; xx < 64; xx += 10) if (rnd() < 0.45) { cg.fillStyle = windows[Math.floor(rnd() * windows.length)]; cg.fillRect(xx, yy, 5, 6); }
       const geo = new THREE.BoxGeometry(w, h, w);
       const rx = Math.round(w / 6), ry = Math.round(h / 12);
       const uv = geo.attributes.uv;
@@ -364,6 +407,131 @@ function skylineMaterial(tiles) {
   return mat;
 }
 
+// ---------------------------------------------------------------- printed scenery
+// Banners, floor markings and pictures (used by map packs):
+//   { type: 'banner', text, sub, image, bg, ink, x, y, z, w, h, rot, both }
+//   { type: 'floor',  text, sub, image, bg, ink, alpha, x, y, z, w, d, rot }
+//   { type: 'image',  image, bg, x, y, z, w, h, rot, both }
+// `image` names a picture in map.images. Everything is drawn into one shared texture,
+// so all of them together cost two draw calls.
+function roundRect(g, x, y, w, h, r) {
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+
+function fitText(g, text, maxW, size, family, weight = '') {
+  let s = size;
+  g.font = `${weight}${s}px ${family}`;
+  while (s > 8 && g.measureText(text).width > maxW) { s -= 2; g.font = `${weight}${s}px ${family}`; }
+  return s;
+}
+
+function drawPrinted(g, d, x, y, pw, ph, img) {
+  const DISPLAY = '"Dela Gothic One", Impact, sans-serif', BODY = '"Atkinson Hyperlegible", system-ui, sans-serif';
+  const pad = Math.round(Math.min(pw, ph) * 0.12);
+  g.save();
+  g.translate(x, y);
+  if (d.bg) {
+    g.globalAlpha = d.alpha ?? 1;
+    g.fillStyle = d.bg;
+    roundRect(g, 0, 0, pw, ph, Math.min(pw, ph) * (d.type === 'image' ? 0.12 : 0.18));
+    g.fill();
+    g.globalAlpha = 1;
+  }
+  if (d.type === 'image' || !d.text) {
+    if (img && img.complete && img.naturalWidth) {
+      const k = Math.min((pw - pad * 2) / img.naturalWidth, (ph - pad * 2) / img.naturalHeight);
+      const w = img.naturalWidth * k, h = img.naturalHeight * k;
+      g.drawImage(img, (pw - w) / 2, (ph - h) / 2, w, h);
+    }
+    g.restore();
+    return;
+  }
+  // icon on the left, then the words
+  let tx = pad;
+  if (img && img.complete && img.naturalWidth) {
+    const ih = ph - pad * 2, iw = ih * img.naturalWidth / img.naturalHeight;
+    g.drawImage(img, pad, pad, iw, ih);
+    tx = pad * 1.6 + iw;
+  }
+  const maxW = pw - tx - pad;
+  const cx = tx + maxW / 2;
+  g.fillStyle = d.ink || '#ffffff';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  if (d.sub) {
+    fitText(g, d.text, maxW, Math.round(ph * 0.42), DISPLAY);
+    g.fillText(d.text, cx, ph * 0.4);
+    g.globalAlpha = 0.8;
+    fitText(g, d.sub, maxW, Math.round(ph * 0.2), BODY, '700 ');
+    g.fillText(d.sub, cx, ph * 0.76);
+    g.globalAlpha = 1;
+  } else {
+    fitText(g, d.text, maxW, Math.round(ph * 0.55), DISPLAY);
+    g.fillText(d.text, cx, ph * 0.53);
+  }
+  g.restore();
+}
+
+function printedDecor(map, quality) {
+  const items = (map.decor || []).filter(d => d.type === 'banner' || d.type === 'floor' || d.type === 'image');
+  if (!items.length) return [];
+  const AW = 2048, PAD = 8;
+  // Pixels per metre: as sharp as fits a 2048 x 1024 texture (2048 x 2048 at most).
+  // Identical pieces (the same logo on many walls) share one spot in the texture.
+  let ppm = 64, slots, AH, uniq;
+  for (;;) {
+    slots = []; uniq = new Map();
+    let x = 0, y = 0, rowH = 0;
+    for (const d of items) {
+      const w = d.w || 4, h = d.type === 'floor' ? (d.d || 4) : (d.h || 1.2);
+      const k = Math.min(ppm, 512 / Math.max(w, h));
+      const pw = Math.max(16, Math.round(w * k)), ph = Math.max(16, Math.round(h * k));
+      const key = [d.type === 'floor' ? 'f' : 'u', d.text, d.sub, d.image, d.bg, d.ink, d.alpha, pw, ph].join('|');
+      let slot = uniq.get(key);
+      if (!slot) {
+        if (x + pw + PAD > AW) { x = 0; y += rowH + PAD; rowH = 0; }
+        slot = { d, x, y, pw, ph };
+        uniq.set(key, slot);
+        x += pw + PAD; rowH = Math.max(rowH, ph);
+      }
+      slots.push({ ...slot, d, w, h });
+    }
+    AH = 1; while (AH < y + rowH) AH *= 2;
+    if (AH <= 1024 || (ppm <= 40 && AH <= 2048) || ppm < 12) break;
+    ppm *= 0.85;
+  }
+  const c = document.createElement('canvas'); c.width = AW; c.height = AH;
+  const g = c.getContext('2d');
+  for (const s of uniq.values()) drawPrinted(g, s.d, s.x, s.y, s.pw, s.ph, s.d.image ? map.images && map.images[s.d.image] : null);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  const upright = new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: 0.02 });
+  const flat = new THREE.MeshLambertMaterial({ map: tex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  const out = [];
+  for (const s of slots) {
+    const geo = new THREE.PlaneGeometry(s.w, s.h);
+    const uv = geo.attributes.uv;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, (s.x + uv.getX(i) * s.pw) / AW, 1 - (s.y + (1 - uv.getY(i)) * s.ph) / AH);
+    const d = s.d;
+    if (d.type === 'floor') {
+      const m = new THREE.Mesh(geo, flat);
+      m.rotation.set(-Math.PI / 2, 0, d.rot || 0);
+      m.position.set(d.x, (d.y || 0) + 0.02, d.z);
+      m.receiveShadow = quality > 0;
+      m.renderOrder = 1;
+      out.push(m);
+    } else {
+      for (const back of d.both ? [0, 1] : [0]) {
+        const m = new THREE.Mesh(back ? geo.clone() : geo, upright);
+        m.position.set(d.x, d.y ?? 2, d.z);
+        m.rotation.y = (d.rot || 0) + back * Math.PI;
+        out.push(m);
+      }
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- static batching
 // Meshes that never move and share identical material settings are merged into one
 // mesh per material. Same geometry, same material, same shadow flags: same pixels,
@@ -413,8 +581,8 @@ function batchStatic(scene, roots) {
 }
 
 // All pickup crates and their rings as two instanced meshes.
-export function makePickupInstances(n) {
-  const box = new THREE.InstancedMesh(new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshLambertMaterial({ map: noteTexture('+1', { paper: '#7ef0c8' }) }), Math.max(1, n));
+export function makePickupInstances(n, note) {
+  const box = new THREE.InstancedMesh(new THREE.BoxGeometry(0.55, 0.55, 0.55), new THREE.MeshLambertMaterial({ map: noteTexture('+1', { paper: '#7ef0c8', ...(note || {}) }) }), Math.max(1, n));
   box.castShadow = true;
   const ring = new THREE.InstancedMesh(new THREE.TorusGeometry(0.55, 0.04, 6, 24), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.6 }), Math.max(1, n));
   box.count = ring.count = n;
@@ -469,7 +637,7 @@ export function buildScene(map, quality = 2) {
   const T = makeTextures();
   scene.background = new THREE.Color(map.fog);
   scene.fog = new THREE.Fog(map.fog, map.night ? 40 : 70, map.night ? 190 : 260);
-  scene.add(skyDome(map.sky[0], map.sky[1], map.night));
+  scene.add(map.sky.length > 2 ? skyDome(map.sky[0], map.sky[2], map.night, map.sky[1]) : skyDome(map.sky[0], map.sky[1], map.night));
 
   // lights
   const hemi = new THREE.HemisphereLight(map.hemi[0], map.hemi[1], map.hemi[2]);
@@ -490,7 +658,7 @@ export function buildScene(map, quality = 2) {
   scene.add(sun, sun.target);
 
   // ground
-  const groundTex = map.id === 'plaza' ? T.grass : T.concrete;
+  const groundTex = T[map.groundTex] || (map.id === 'plaza' ? T.grass : T.concrete);
   groundTex.repeat.set(map.width * 2.2 / 6, map.depth * 2.2 / 6);
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(map.width * 2.2, map.depth * 2.2), new THREE.MeshLambertMaterial({ color: map.ground, map: groundTex }));
   ground.rotation.x = -Math.PI / 2; ground.receiveShadow = quality > 0;
@@ -514,7 +682,7 @@ export function buildScene(map, quality = 2) {
   for (const m of buildBoxes(map, T, quality)) scene.add(m);
 
   // neon edge glow on the night map
-  if (map.night) {
+  if (map.edgeGlow ?? map.night) {
     const pts = [];
     for (const b of map.boxes) {
       if (b.h < 0.9 || b.w > 60 || b.d > 60) continue;
@@ -523,13 +691,16 @@ export function buildScene(map, quality = 2) {
     }
     const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
     scene.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: '#ff9ad5', transparent: true, opacity: 0.55 })));
+  }
+  if (map.stars ?? map.night) {
     // stars
     const sp = [];
     const r = seeded(11);
     for (let i = 0; i < 400; i++) { const a = r() * Math.PI * 2, e = 0.15 + r() * 1.2; sp.push(Math.cos(a) * Math.cos(e) * 400, Math.sin(e) * 400, Math.sin(a) * Math.cos(e) * 400); }
     const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
     scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: '#ffffff', size: 1.4, sizeAttenuation: false, fog: false })));
-  } else {
+  }
+  if (map.clouds ?? !map.night) {
     // clouds
     const r = seeded(5);
     const cm = new THREE.MeshLambertMaterial({ color: '#ffffff', flatShading: true, emissive: '#ffffff', emissiveIntensity: 0.35 });
@@ -551,12 +722,19 @@ export function buildScene(map, quality = 2) {
     if (d.type === 'statue') { m = makeStatue(); m.position.set(d.x, d.y, d.z); }
     if (d.type === 'forklift') { m = makeForklift(); m.position.set(d.x, 0, d.z); m.rotation.y = d.rot || 0; }
     if (d.type === 'lamp') { m = makeLamp(map.night); m.position.set(d.x, 0, d.z); }
+    if (d.type === 'box') {
+      // scenery only (no collision): posts, plinths outside the walls
+      m = new THREE.Mesh(new THREE.BoxGeometry(d.w || 1, d.h || 1, d.d || 1), new THREE.MeshLambertMaterial({ color: d.color || '#ffffff' }));
+      m.position.set(d.x, (d.y0 || 0) + (d.h || 1) / 2, d.z);
+      m.castShadow = quality > 0;
+    }
     if (d.type === 'sign') {
       m = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 1.3), new THREE.MeshBasicMaterial({ map: signTexture(d.text, d.color) }));
       m.position.set(d.x, d.y, d.z); m.rotation.y = d.rot || 0;
     }
     if (m) { scene.add(m); statics.push(m); }
   }
+  for (const m of printedDecor(map, quality)) { scene.add(m); statics.push(m); }
   const outskirts = makeOutskirts(map, quality);
   scene.add(outskirts); statics.push(outskirts);
   batchStatic(scene, statics);

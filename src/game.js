@@ -9,6 +9,7 @@ import { CFG, MODES, TEAM, GADGETS, STREAKS, DIFFICULTY, BOT_NAMES, SHIRT_COLORS
 import { World } from './world.js';
 import { MAPS } from './maps.js';
 import { BotBrain } from './bot.js';
+import { packForMap } from './packs.js';
 
 const lerp = (a, b, t) => a + (b - a) * t;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -60,6 +61,8 @@ export class Game {
     this.opts = opts;
     this.mapId = opts.mapId;
     this.map = MAPS[opts.mapId]();
+    this.pack = packForMap(opts.mapId);
+    this.watchers = []; // people in the room who are only watching: [{ id, name }]
     this.world = new World(this.map);
     this.mode = MODES[opts.mode];
     this.teams = this.mode.teams;
@@ -204,10 +207,12 @@ export class Game {
 
   addBots(n) {
     const used = new Set([...this.players.values()].map(p => p.name));
-    const names = BOT_NAMES.filter(x => !used.has(x)).sort(() => Math.random() - 0.5);
+    const B = (this.pack && this.pack.theme && this.pack.theme.bots) || {};
+    const names = (B.names || BOT_NAMES).filter(x => !used.has(x)).sort(() => Math.random() - 0.5);
     for (let i = 0; i < n && this.players.size < MAX_PLAYERS; i++) {
       const name = names[i] || `Bot ${i + 1}`;
-      this.addPlayer({ name, isBot: true, hat: Math.random() < 0.7 ? pick(HATS.slice(1)) : 'none' });
+      const hats = B.hats || HATS.slice(1);
+      this.addPlayer({ name, isBot: true, hat: Math.random() < 0.7 ? pick(hats) : 'none', shirt: B.shirts ? pick(B.shirts) : undefined });
     }
   }
 
@@ -379,6 +384,7 @@ export class Game {
       }
       case 'leave': this.removePlayer(ev.id); if (this.authority && this.br) this.checkWin(); break;
       case 'team': { const p = P(ev.id); if (p) p.team = ev.team; break; }
+      case 'watch': this.watchers = Array.isArray(ev.list) ? ev.list : []; break;
       case 'chat': break;
     }
     for (const fn of this.listeners) fn(ev);
@@ -734,6 +740,7 @@ export class Game {
       players: [...this.players.values()].map(p => this.playerInit(p)),
       flags: this.flags, pickups: this.pickups.map(pk => ({ active: pk.active, t: pk.t })),
       smokes: this.smokes, distracts: this.distracts, grenades: this.grenades, zone: this.zone,
+      watchers: this.watchers,
     };
   }
 
@@ -755,6 +762,7 @@ export class Game {
     for (const d of s.distracts || []) this.distracts.push({ ...d });
     for (const g of s.grenades || []) this.grenades.push({ ...g });
     if (s.zone && this.zone) Object.assign(this.zone, s.zone);
+    if (Array.isArray(s.watchers)) this.watchers = s.watchers;
   }
 
   // Binary snapshot of every player's continuous state (about 3x smaller than JSON).

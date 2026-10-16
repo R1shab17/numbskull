@@ -3,7 +3,12 @@ import { HostNet, ClientNet, onlineSupported } from './net.js';
 import { Game, NET } from './game.js';
 import { MAX_PLAYERS, NET_VERSION, PUBLIC } from './config.js';
 import { PUBLIC_PREFIX } from './net.js';
-import { MAP_LIST } from './maps.js';
+import { MAPS } from './maps.js';
+import { builtInMaps } from './packs.js';
+
+// Spectators don't take a player slot, but a room can't hold unlimited connections.
+export const MAX_WATCHERS = 12;
+const lobbyView = (p) => ({ id: p.id, name: p.name, shirt: p.shirt, host: p.host, watch: !!p.watch });
 
 export const publicId = (slot) => PUBLIC_PREFIX + slot;
 
@@ -31,7 +36,7 @@ export class HostSession {
     const app = this.app;
     if (!onlineSupported()) { app.ui.go('message', { title: 'Online rooms unavailable here', text: "This page can't open peer-to-peer connections, which online rooms need. Open Numbskull from its own page (for example a GitHub Pages link) to host or join. Bots work everywhere." }); return; }
     if (!this.public) app.ui.go('message', { title: 'Opening your room…', text: 'Getting a room code from the matchmaking server.', busy: true });
-    this.lobby = [{ id: 1, ...this.profileInfo(app.profile), host: true }];
+    this.lobby = [{ id: 1, ...this.profileInfo(app.profile), host: true, watch: false }];
     this.net = new HostNet({
       onReady: (code) => {
         this.code = code;
@@ -52,35 +57,83 @@ export class HostSession {
 
   showLobby() {
     this.inGame = false;
-    this.app.ui.go('lobby', { host: true, code: this.code, you: 1, players: this.lobby.map(p => ({ id: p.id, name: p.name, shirt: p.shirt, host: p.host })), settings: this.app.match });
+    this.app.ui.go('lobby', { host: true, code: this.code, you: 1, players: this.lobby.map(lobbyView), settings: this.app.match });
     this.broadcastLobby();
   }
 
   broadcastLobby() {
     if (!this.net) return;
-    const msg = { t: 'lobby', code: this.code, players: this.lobby.map(p => ({ id: p.id, name: p.name, shirt: p.shirt, host: p.host })), settings: this.app.match };
+    const msg = { t: 'lobby', code: this.code, players: this.lobby.map(lobbyView), settings: this.app.match };
     this.net.broadcast(msg);
     if (this.app.ui.cur === 'lobby' && !this.inGame) this.app.ui.go('lobby', { host: true, code: this.code, you: 1, players: msg.players, settings: this.app.match });
+  }
+
+  // the host switches between playing and watching (lobby toggle)
+  setWatch(on) {
+    const me = this.lobby.find(p => p.host);
+    if (!me) return;
+    if (!on && this.playerCount() >= MAX_PLAYERS) { this.app.ui.toast('The room is full of players.'); return; }
+    me.watch = !!on;
+    this.broadcastLobby();
+  }
+
+  playerCount() { return this.lobby.filter(p => !p.watch).length; }
+  watcherCount() { return this.lobby.filter(p => p.watch).length; }
+
+  // tell everyone in the match who is watching
+  syncWatchers() {
+    const game = this.app.game;
+    if (!game || !this.inGame) return;
+    game.emit({ k: 'watch', list: this.lobby.filter(p => p.watch).map(p => ({ id: p.id, name: p.name })) });
+  }
+
+  // a watcher becomes a player in the running match
+  jumpIn(lp) {
+    const game = this.app.game;
+    if (!game || !this.inGame || !lp.watch) return false;
+    const humans = [...game.players.values()].filter(p => !p.isBot).length;
+    if (humans >= MAX_PLAYERS) return false;
+    if (game.players.size >= MAX_PLAYERS) {
+      const bot = [...game.players.values()].find(p => p.isBot);
+      if (bot) game.emit({ k: 'leave', id: bot.id });
+    }
+    lp.watch = false;
+    const p = game.addPlayer({ id: lp.id, ...this.profileInfo(lp), remote: !lp.host });
+    game.emit({ k: 'join', p: game.playerInit(p) });
+    game.emit({ k: 'jumped', id: lp.id }); // after the join, so the client already has the player
+    this.syncWatchers();
+    return true;
+  }
+
+  jumpInRequest() { this.hostJumpIn(); }
+  hostJumpIn() {
+    const me = this.lobby.find(p => p.host);
+    if (!me || !this.jumpIn(me)) { this.app.ui.toast('No room to jump in right now.'); return; }
+    this.app.becomePlayer(me.id);
   }
 
   settingsChanged() { this.app.saveMatch(); this.showLobby(); }
 
   startMatch() {
     const app = this.app;
-    const M = this.public ? { ...PUBLIC.match, mapId: MAP_LIST[Math.floor(Math.random() * MAP_LIST.length)].id, bots: Math.max(0, PUBLIC.fill - this.lobby.length) } : app.match;
+    const maps = builtInMaps();
+    const M = this.public ? { ...PUBLIC.match, mapId: maps[Math.floor(Math.random() * maps.length)].id, bots: Math.max(0, PUBLIC.fill - this.lobby.length) } : app.match;
     const game = new Game({ mapId: M.mapId, mode: M.mode, digits: M.digits, scoreLimit: M.scoreLimit, timeLimit: M.timeLimit, difficulty: M.difficulty, lives: M.lives, authority: true });
-    for (const lp of this.lobby) {
+    const players = this.lobby.filter(lp => !lp.watch);
+    for (const lp of players) {
       const p = game.addPlayer({ id: lp.id, ...this.profileInfo(lp), remote: !lp.host });
       if (lp.host) game.localId = p.id;
     }
-    game.addBots(Math.max(0, Math.min(M.bots, MAX_PLAYERS - this.lobby.length)));
+    game.watchers = this.lobby.filter(lp => lp.watch).map(lp => ({ id: lp.id, name: lp.name }));
+    app.watching = !!this.lobby.find(lp => lp.host && lp.watch);
+    game.addBots(Math.max(0, Math.min(M.bots, MAX_PLAYERS - players.length)));
     this.nextRoundAt = null;
     game.on((ev) => { if (ev.k === 'phase' && ev.phase === 'end' && this.public) this.nextRoundAt = performance.now() + (PUBLIC.intermission + 2.6) * 1000; });
     game.balanceTeams();
     this.inGame = true;
     app.beginMatch(game);
     const state = game.fullState();
-    for (const lp of this.lobby) if (lp.conn) this.net.send(lp.conn, { t: 'start', state, you: lp.id });
+    for (const lp of this.lobby) if (lp.conn) this.net.send(lp.conn, { t: 'start', state, you: lp.id, watch: !!lp.watch });
   }
 
   restart() { this.startMatch(); }
@@ -98,8 +151,9 @@ export class HostSession {
     const pid = this.byConn.get(conn);
     if (msg.t === 'hello') {
       if (msg.ver !== NET_VERSION) { this.net.send(conn, { t: 'reject', reason: 'Your copy of Numbskull is a different version from the host. Refresh both pages and try again.' }); setTimeout(() => this.net.kick(conn), 300); return; }
-      const count = this.inGame && game ? [...game.players.values()].filter(p => !p.isBot).length : this.lobby.length;
-      if (count >= MAX_PLAYERS) { this.net.send(conn, { t: 'reject', reason: 'That room is full.', full: true }); setTimeout(() => this.net.kick(conn), 300); return; }
+      const watch = !!msg.watch && !this.public;
+      const count = watch ? this.watcherCount() : this.inGame && game ? [...game.players.values()].filter(p => !p.isBot).length : this.playerCount();
+      if (count >= (watch ? MAX_WATCHERS : MAX_PLAYERS)) { this.net.send(conn, { t: 'reject', reason: watch ? 'That room already has as many spectators as it can take.' : 'That room is full.', full: true }); setTimeout(() => this.net.kick(conn), 300); return; }
       // ids must not collide with bots already in a running match
       const id = Math.max(this.nextId, game ? game.nextId : 0);
       this.nextId = id + 1;
@@ -109,9 +163,13 @@ export class HostSession {
       if (game) for (const p of game.players.values()) names.add(p.name);
       let nm = info.name, k = 2; while (names.has(nm)) nm = `${info.name.slice(0, 13)} ${k++}`;
       info.name = nm;
-      this.lobby.push({ id, ...info, conn });
+      this.lobby.push({ id, ...info, conn, watch });
       this.byConn.set(conn, id);
-      if (this.inGame && game) {
+      if (this.inGame && game && watch) {
+        // watch the running match
+        this.net.send(conn, { t: 'start', state: game.fullState(), you: id, watch: true });
+        this.syncWatchers();
+      } else if (this.inGame && game) {
         // drop into the running match, replacing a bot if we're full
         if (game.players.size >= MAX_PLAYERS) {
           const bot = [...game.players.values()].find(p => p.isBot);
@@ -131,10 +189,25 @@ export class HostSession {
       case 'photo': if (game && this.inGame) { const p = game.players.get(pid); if (p) { p.camCd = 0; game.takePhoto(pid); } } break;
       case 'chat': {
         const text = String(msg.msg || '').slice(0, 120).trim();
-        if (text && game && this.inGame) { const p = game.players.get(pid); game.emit({ k: 'chat', id: pid, msg: text, dead: !!(game.br && p && !p.alive && game.phase === 'play') }); }
+        if (text && game && this.inGame) this.emitChat(pid, text);
         break;
       }
       case 'ping': this.net.send(conn, { t: 'pong', c: msg.c }); break;
+      case 'watch': {
+        // lobby toggle between playing and watching
+        const lp = this.lobby.find(p => p.id === pid);
+        if (!lp || this.inGame) break;
+        if (msg.on && !lp.watch && this.watcherCount() >= MAX_WATCHERS) break;
+        if (!msg.on && lp.watch && this.playerCount() >= MAX_PLAYERS) break;
+        lp.watch = !!msg.on;
+        this.broadcastLobby();
+        break;
+      }
+      case 'jumpin': {
+        const lp = this.lobby.find(p => p.id === pid);
+        if (!lp || !this.jumpIn(lp)) this.net.send(conn, { t: 'nojump' });
+        break;
+      }
       case 'bye': this.net.kick(conn); this.onLeave(conn); break;
     }
   }
@@ -146,7 +219,7 @@ export class HostSession {
       if (!lp.conn) continue;
       const seen = lp.conn._seen || now;
       if (!lp.conn._seen) lp.conn._seen = now;
-      if (now - seen > 9000) { this.net.kick(lp.conn); this.onLeave(lp.conn); }
+      if (now - seen > 12000) { this.net.kick(lp.conn); this.onLeave(lp.conn); }
     }
   }
 
@@ -156,8 +229,10 @@ export class HostSession {
     const id = this.byConn.get(conn);
     if (!id) return;
     this.byConn.delete(conn);
+    const was = this.lobby.find(p => p.id === id);
     this.lobby = this.lobby.filter(p => p.id !== id);
     const game = this.app.game;
+    if (was && was.watch && this.inGame) { this.syncWatchers(); this.broadcastLobby(); return; }
     if (this.inGame && game && game.players.has(id)) {
       game.emit({ k: 'leave', id, left: true });
       // keep the match lively: top back up with a bot
@@ -165,10 +240,25 @@ export class HostSession {
     } else this.broadcastLobby();
   }
 
-  sendChat(text) { const g = this.app.game; if (g) { const p = g.local; g.emit({ k: 'chat', id: g.localId, msg: text.slice(0, 120), dead: !!(g.br && p && !p.alive && g.phase === 'play') }); } }
+  // Out-of-play people (knocked out in Battle Royale, or watching) only talk to each other
+  // while a Battle Royale round is running, so nobody can call out positions.
+  emitChat(id, text) {
+    const g = this.app.game;
+    if (!g) return;
+    const p = g.players.get(id);
+    const lp = this.lobby.find(x => x.id === id);
+    const watch = !p;
+    g.emit({ k: 'chat', id, name: p ? undefined : lp?.name, watch, msg: text.slice(0, 120), dead: !!(g.br && g.phase === 'play' && (watch || !p.alive)) });
+  }
+  sendChat(text) { const g = this.app.game; if (g) this.emitChat(g.localId || 1, text); }
 
   tick(dt) {
     const game = this.app.game;
+    // if this tab itself froze for a while (loading a map on a slow machine), messages are
+    // still queued: don't mistake that for everyone else going quiet
+    const now = performance.now();
+    if (this.lastTick && now - this.lastTick > 2500) for (const lp of this.lobby) if (lp.conn) lp.conn._seen = now;
+    this.lastTick = now;
     this.reapT = (this.reapT || 0) - dt;
     if (this.reapT <= 0) { this.reapT = 1; this.reap(); }
     if (this.public && this.nextRoundAt && performance.now() > this.nextRoundAt && this.net) {
@@ -205,6 +295,7 @@ export class ClientSession {
     this.app = app; this.type = 'client'; this.net = null; this.code = null; this.id = null;
     this.stateT = 0; this.pingT = 0; this.ping = 0; this.inGame = false; this.closed = false;
     this.public = !!opts.public; this.slot = opts.slot || 0; this.onFail = opts.onFail;
+    this.watch = !!opts.watch;
   }
 
   join(code) {
@@ -212,7 +303,7 @@ export class ClientSession {
     this.code = code ? code.toUpperCase() : null;
     if (!onlineSupported()) { if (this.public) this.onFail?.('error', "Online play can't run on this page."); else app.ui.joinError("Online rooms can't run on this page. Open Numbskull from its own page to join."); return; }
     this.net = new ClientNet({
-      onOpen: () => this.net.send({ t: 'hello', ver: NET_VERSION, profile: { name: app.profile.name, shirt: app.profile.shirt, skin: app.profile.skin, hat: app.profile.hat } }),
+      onOpen: () => this.net.send({ t: 'hello', ver: NET_VERSION, watch: this.watch, profile: { name: app.profile.name, shirt: app.profile.shirt, skin: app.profile.skin, hat: app.profile.hat } }),
       onData: (m) => this.onData(m),
       onError: (msg, kind) => {
         if (this.closed) return;
@@ -263,23 +354,40 @@ export class ClientSession {
       case 'start': {
         this.id = m.you;
         const s = m.state;
+        if (!MAPS[s.opts.mapId]) {
+          // the host picked a map that only exists on another copy of the game
+          this.lost("This room is playing a map your copy of Numbskull doesn't have. Open the game from the same site as your host and join again.");
+          this.close();
+          break;
+        }
         const game = new Game({ ...s.opts, authority: false });
         game.loadState(s);
-        game.localId = m.you;
+        game.localId = m.watch ? null : m.you;
         const me = game.players.get(m.you);
-        if (me) me.remote = false;
+        if (me && !m.watch) me.remote = false;
         this.inGame = true;
+        app.watching = !!m.watch;
         app.beginMatch(game);
         break;
       }
-      case 'ev': if (app.game && this.inGame) for (const e of m.e) app.game.applyEvent(e); break;
+      case 'nojump': app.ui.toast('No room to jump in right now.'); break;
+      case 'ev':
+        if (app.game && this.inGame) for (const e of m.e) {
+          app.game.applyEvent(e);
+          // the host let us jump in from watching
+          if (e.k === 'jumped' && e.id === this.id && app.watching) app.becomePlayer(e.id);
+        }
+        break;
 
       case 'pong': this.ping = Math.round(performance.now() - m.c); break;
     }
   }
 
   tick(dt) {
-    if (this.seen && performance.now() - this.seen > 7000 && !this.closed) { this.lost('Lost contact with the host.'); this.close(); return; }
+    const now = performance.now();
+    if (this.lastTick && now - this.lastTick > 2500 && this.seen) this.seen = now; // we were frozen, not the host
+    this.lastTick = now;
+    if (this.seen && now - this.seen > 10000 && !this.closed) { this.lost('Lost contact with the host.'); this.close(); return; }
     this.pingT -= dt;
     if (this.pingT <= 0 && this.net) { this.pingT = 2; this.net.send({ t: 'ping', c: performance.now() }); }
     const game = this.app.game;
@@ -302,6 +410,8 @@ export class ClientSession {
     return true;
   }
   sendChat(text) { this.net.send({ t: 'chat', msg: text.slice(0, 120) }); }
+  setWatch(on) { this.net.send({ t: 'watch', on: !!on }); }
+  jumpInRequest() { this.net.send({ t: 'jumpin' }); }
 
   close() {
     if (!this.closed) this.net?.send({ t: 'bye' });

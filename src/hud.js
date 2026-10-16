@@ -1,5 +1,6 @@
 // In-game HUD (plain DOM over the canvas).
 import { CFG, GADGETS, GADGET_LABEL, TEAM_NAME, TEAM_COLOR } from './config.js';
+import { L, say } from './lingo.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -28,7 +29,8 @@ export class Hud {
       gadgets: $('gadgets'), photo: $('photo'), photocv: $('photocv'), phototime: $('phototime'), death: $('death'), deathby: $('deathby'), deathcode: $('deathcode'), respawn: $('respawn'),
       chatlog: $('chatlog'), chatform: $('chatform'), chatin: $('chatin'), scoreboard: $('scoreboard'), ctp: $('clicktoplay'), fps: $('fps'),
       zonebar: $('zonebar'), zonewarn: $('zonewarn'), zonesecs: $('zonesecs'),
-      specName: $('specName'), specInfo: $('specInfo'), specLbl: $('specLbl'), specView: $('specView'), specFast: $('specFast'), specHint: $('specHint'),
+      specName: $('specName'), specInfo: $('specInfo'), specLbl: $('specLbl'), specView: $('specView'), specFast: $('specFast'), specHint: $('specHint'), specJoin: $('specJoin'),
+      deathLbl: document.querySelector('#death .lbl'), zonewarnB: document.querySelector('#zonewarn b'),
     };
     this.buffer = '';
     this.digits = 4;
@@ -57,7 +59,15 @@ export class Hud {
     this.el.scoreboard.hidden = true;
     this.buildMinimap(game);
     this.gadgetSig = '';
+    this.watcherList = game.watchers || [];
+    // words can change with the map's theme
+    this.el.hint.textContent = say('typeHint');
+    this.el.deathLbl.textContent = say('deathLabel');
+    this.el.zonewarnB.textContent = say('outside');
+    this._nl = null; this.lastTimer = '';
   }
+
+  watchers(list) { this.watcherList = list || []; this._sb = null; }
 
   // ---------------------------------------------------------------- typing
   renderSlots(state) {
@@ -179,9 +189,9 @@ export class Hud {
       g.fillStyle = TEAM_COLOR[t]; g.strokeStyle = '#fff'; g.lineWidth = 1.5;
       g.beginPath(); g.moveTo(x, y + 5); g.lineTo(x, y - 7); g.lineTo(x + 7, y - 4); g.lineTo(x, y - 1); g.closePath(); g.fill(); g.stroke();
     }
-    if (local && (game.teams || (!local.alive && game.br))) {
+    if (!local || game.teams || (!local.alive && game.br)) {
       for (const p of game.players.values()) {
-        if (!p.alive || p.id === local.id || (game.teams && p.team !== local.team && local.alive)) continue;
+        if (!p.alive || (local && (p.id === local.id || (game.teams && p.team !== local.team && local.alive)))) continue;
         const [x, y] = P(p.x, p.z);
         g.fillStyle = p.team ? TEAM_COLOR[p.team] : '#ffe45c'; g.beginPath(); g.arc(x, y, 3, 0, 7); g.fill();
       }
@@ -200,7 +210,7 @@ export class Hud {
     const E = this.el;
     // timer
     let tt;
-    if (game.phase === 'countdown') tt = 'GET READY';
+    if (game.phase === 'countdown') tt = say('getReady');
     else { const t = Math.max(0, Math.ceil(game.timeLeft)); tt = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; }
     if (tt !== this.lastTimer) { E.timer.textContent = tt; E.timer.classList.toggle('low', game.phase === 'play' && game.timeLeft < 30); this.lastTimer = tt; }
     // scores
@@ -213,15 +223,18 @@ export class Hud {
       put(E.sl, 'title', 'Players still in'); put(E.sr, 'title', 'Players you knocked out');
     } else if (game.teams) {
       const lim = game.scoreLimit;
-      sl = `<small>Red</small>${game.teamScore[1]}`; sr = `${game.teamScore[2]}<small>Blue</small>`;
+      sl = `<small>${esc(TEAM_NAME[1])}</small>${game.teamScore[1]}`; sr = `${game.teamScore[2]}<small>${esc(TEAM_NAME[2])}</small>`;
       put(E.sl, 'className', 'scorechip red' + (game.teamScore[1] > game.teamScore[2] ? ' lead' : ''));
       put(E.sr, 'className', 'scorechip blue' + (game.teamScore[2] > game.teamScore[1] ? ' lead' : ''));
       put(E.sl, 'title', `First to ${lim}`); put(E.sr, 'title', `First to ${lim}`);
+      put(E.sr, 'background', ''); // team colour comes from the class (a previous match may have set white)
     } else {
       const l = game.leader();
       const me = local;
-      sl = `<small>You</small>${me ? me.kills : 0}`;
-      const other = l && me && l.id === me.id ? [...game.players.values()].filter(p => p.id !== me.id).sort((a, b) => b.kills - a.kills)[0] : l;
+      // a spectator sees the top two instead of "you"
+      const top = me ? null : [...game.players.values()].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
+      sl = me ? `<small>You</small>${me.kills}` : `<small>${top[0] ? esc(top[0].name) : '—'}</small>${top[0] ? top[0].kills : 0}`;
+      const other = !me ? top[1] : l && l.id === me.id ? [...game.players.values()].filter(p => p.id !== me.id).sort((a, b) => b.kills - a.kills)[0] : l;
       sr = `${other ? other.kills : 0}<small>${other ? esc(other.name) : '—'}</small>`;
       put(E.sl, 'className', 'scorechip' + (me && l && me.id === l.id ? ' lead' : ''));
       put(E.sr, 'className', 'scorechip alt');
@@ -243,10 +256,10 @@ export class Hud {
       const Z = game.zone;
       const secs = Math.ceil(Z.t);
       let zt;
-      if (game.phase === 'countdown') zt = 'Zone starts shrinking soon';
-      else if (Z.state === 'wait') zt = `Zone shrinks in ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
-      else if (Z.state === 'shrink') zt = 'Zone is shrinking';
-      else zt = 'Final zone';
+      if (game.phase === 'countdown') zt = say('zoneSoon');
+      else if (Z.state === 'wait') zt = say('zoneWait', { t: `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}` });
+      else if (Z.state === 'shrink') zt = say('zoneShrink');
+      else zt = say('zoneFinal');
       if (zt !== this._zt) { E.zonebar.textContent = zt; this._zt = zt; }
       E.zonebar.classList.toggle('closing', Z.state === 'shrink');
       const out = local && local.alive && (local.outT || 0) > 0.05 && game.phase === 'play';
@@ -254,12 +267,12 @@ export class Hud {
       if (out) put(E.zonesecs, 'textContent', String(Math.max(0, Math.ceil(4 - local.outT))));
     }
 
-    if (!local) return;
+    if (!local) { this.drawMinimap(game, null); return; } // watching: just the map
     // my number
     const num = local.alive ? local.num : '····';
     if (num !== this._num) { E.mynum.textContent = num; this._num = num; }
     E.mynote.classList.toggle('safe', local.protect > 0);
-    const nl = game.br && local.alive ? `On your head · ${local.notes || 1} ${local.notes > 1 ? 'notes' : 'note'} left` : 'On your head';
+    const nl = game.br && local.alive ? `${say('onYourHead')} · ${local.notes || 1} ${local.notes > 1 ? 'notes' : 'note'} left` : say('onYourHead');
     if (nl !== this._nl) { E.mynote.querySelector('.lbl').textContent = nl; this._nl = nl; E.mynote.classList.toggle('stack', game.br && (local.notes || 1) > 1); }
 
     // flash / blind
@@ -304,7 +317,7 @@ export class Hud {
       hide(E.death, false);
       const k = game.players.get(local.killedBy);
       const by = k ? esc(k.name) : 'someone';
-      let html = local.killedCode === 'ZONE' ? 'Caught by the zone' : `Read by ${by}`;
+      let html = local.killedCode === 'ZONE' ? esc(say('zoneDeath')) : esc(say('readBy', { name: '\u0000' })).replace('\u0000', by);
       if (game.br && local.place) html += `<br><span class="place-chip">#${local.place} of ${[...game.players.values()].filter(p => p.spawned).length}</span>`;
       if (this._death !== html + local.killedCode) {
         E.deathby.innerHTML = html;
@@ -324,7 +337,8 @@ export class Hud {
     if (!on) return;
     const t = info.target;
     const god = view.mode === 'spec-god';
-    put(E.specLbl, 'textContent', info.late ? 'Next round soon · spectating' : god ? 'God view' : 'Spectating');
+    put(E.specLbl, 'textContent', info.watching ? (god ? 'Watching · god view' : 'Watching') : info.late ? 'Next round soon · spectating' : god ? 'God view' : 'Spectating');
+    hide(E.specJoin, !info.canJoin);
     const name = god ? `${game.aliveCount()} left` : t ? t.name : 'nobody';
     if (E.specName.textContent !== name) E.specName.textContent = name;
     const inf = god ? 'Click a player to follow them' : t ? `${t.num} · ${t.kills} out · ${'■'.repeat(t.notes || 1)} ${t.notes > 1 ? 'notes' : 'note'}` : '';
@@ -359,14 +373,24 @@ export class Hud {
     if (!show) return;
     const me = game.localId;
     const row = (p) => `<tr class="${p.id === me ? 'me' : ''} ${p.alive ? '' : 'dead'}"><td>${esc(p.name)}${p.isBot ? ' <small style="opacity:.5">bot</small>' : ''}</td><td class="n">${p.kills}</td><td class="n">${p.deaths}</td>${game.mode.id === 'ctf' ? `<td class="n">${p.caps}</td>` : ''}<td class="n">${p.misses}</td><td class="n">${p.fastest ? (p.fastest / 1000).toFixed(2) + 's' : '–'}</td></tr>`;
-    const head = `<tr><th>Name</th><th class="n">Reads</th><th class="n">Deaths</th>${game.mode.id === 'ctf' ? '<th class="n">Caps</th>' : ''}<th class="n">Misses</th><th class="n">Fastest</th></tr>`;
+    const head = `<tr><th>Name</th><th class="n">${esc(game.br ? L.colOut : L.colReads)}</th><th class="n">${esc(L.colDeaths)}</th>${game.mode.id === 'ctf' ? '<th class="n">Caps</th>' : ''}<th class="n">${esc(L.colMisses)}</th><th class="n">${esc(L.colFastest)}</th></tr>`;
     const sorted = [...game.players.values()].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
-    let h = `<h3><span>${game.mode.name} · ${game.map.name}</span><span>${game.teams ? '' : 'First to ' + game.scoreLimit}</span></h3>`;
+    let h = `<h3><span>${game.mode.name} · ${esc(game.map.name)}</span><span>${game.teams ? '' : 'First to ' + game.scoreLimit}</span></h3>`;
+    // a themed map crowns whoever is in front
+    if (L.champion) {
+      let who = null;
+      if (game.teams) { if (game.teamScore[1] !== game.teamScore[2]) who = `${TEAM_NAME[game.teamScore[1] > game.teamScore[2] ? 1 : 2]} team`; }
+      else if (game.br) { const alive = sorted.filter(p => p.alive); if (alive.length === 1) who = alive[0].name; else if (sorted[0] && sorted[0].kills) who = sorted[0].name; }
+      else if (sorted[0] && sorted[0].kills && (!sorted[1] || sorted[0].kills > sorted[1].kills)) who = sorted[0].name;
+      h += `<div class="champ"><span>🏆</span><span>${esc(L.champion)}</span><b>${who ? esc(who) : 'up for grabs'}</b></div>`;
+    }
     if (game.teams) {
       for (const t of [1, 2]) {
-        h += `<div class="team${t}"><h3><span>${TEAM_NAME[t]}</span><span>${game.teamScore[t]}</span></h3><table>${head}${sorted.filter(p => p.team === t).map(row).join('')}</table></div>`;
+        h += `<div class="team${t}"><h3><span>${esc(TEAM_NAME[t])}</span><span>${game.teamScore[t]}</span></h3><table>${head}${sorted.filter(p => p.team === t).map(row).join('')}</table></div>`;
       }
     } else h += `<table>${head}${sorted.map(row).join('')}</table>`;
+    const W = this.watcherList || [];
+    if (W.length) h += `<div class="watchers">Watching: ${W.map(w => esc(w.name)).join(', ')}</div>`;
     if (h !== this._sb) { E.innerHTML = h; this._sb = h; }
   }
 }

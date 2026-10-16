@@ -78,7 +78,7 @@ export class Renderer {
         this.flagMeshes[t] = m;
       }
     }
-    this.pickups = makePickupInstances(game.pickups.length);
+    this.pickups = makePickupInstances(game.pickups.length, game.map.pickupNote);
     scene.add(this.pickups.box, this.pickups.ring);
     for (const p of game.players.values()) this.ensureAvatar(p);
     this.attractT = 0;
@@ -95,7 +95,7 @@ export class Renderer {
   buildZone(scene) {
     const mat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: false,
-      uniforms: { t: { value: 0 }, col: { value: new THREE.Color('#ff4f8b') } },
+      uniforms: { t: { value: 0 }, col: { value: new THREE.Color(this.game.map.zoneColor || '#ff4f8b') } },
       vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
       fragmentShader: `uniform float t; uniform vec3 col; varying vec2 vUv;
         void main(){

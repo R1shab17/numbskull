@@ -218,8 +218,8 @@ function neonRooftops() {
   };
 }
 
-function finalize(m) {
-  m.teamSpawns[2] = m.teamSpawns[1].map(([x, z]) => [-x, z]);
+export function finalize(m) {
+  if (!m.teamSpawns[2]) m.teamSpawns[2] = m.teamSpawns[1].map(([x, z]) => [-x, z]);
   m.boxes = m.boxes.filter(b => b && b.h > 0.02 && b.w > 0.02 && b.d > 0.02);
   return m;
 }
@@ -229,6 +229,9 @@ export const MAPS = {
   depot: () => finalize(cardboardDepot()),
   neon: () => finalize(neonRooftops()),
 };
+
+// Building blocks handed to map packs (see packs.js), so extra maps use the same rules.
+export const mapKit = { B, flight, mirror, mirrorPts, perimeter };
 
 export const MAP_LIST = [
   { id: 'plaza', name: 'Sticky Plaza', blurb: 'Sunny town square. Rooftops, hedges and a suspicious statue.' },

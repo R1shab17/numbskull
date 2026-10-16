@@ -14,6 +14,7 @@ Press **Play online** to drop into a public Battle Royale with whoever else is p
 
 - **With anyone:** press **Play online**. You land in a public Battle Royale room; rounds run back to back and bots fill the empty spots.
 - **With friends:** one person picks **Host a private room** and shares the 4-letter code. Everyone else picks **Join with a code** and types it.
+- **Just watching:** on the join screen press **Watch** instead of Join (or **Just watch** in the room) to spectate any mode without taking a player slot. Press **Jump in** whenever you want to play.
 - **Offline:** download `docs/index.html` and open it. It's a single self-contained file (about 0.9 MB) and works without internet against bots.
 
 ## How it works
@@ -36,6 +37,7 @@ Press **Play online** to drop into a public Battle Royale with whoever else is p
 
 ### Battle Royale and spectating
 
+- Spectators can watch every mode. In a private room, anyone (the host too) can pick **Just watch** in the room or **Watch** on the join screen. Watchers can chat (during a Battle Royale round, only with each other and knocked-out players) and press **Jump in** to start playing (from the next round in Battle Royale).
 - The zone shrinks in five stages. The dotted circle on the minimap shows where it closes to next; stay outside it for more than 4 seconds and you're out.
 - Nobody can be read for the first few seconds of a round, so everyone gets a chance to scatter.
 - Once you're out you spectate. Follow any player with `←` `→` (or the on-screen arrows), or press `V` for the god view: drag or WASD to pan, wheel to zoom, `Q`/`E` to rotate, click a player to follow them. Every head shows its name and number while you watch.
@@ -102,7 +104,8 @@ npm run sim      # bot-vs-bot balance simulation, no browser needed
 | `src/bot.js` | Bot brains: reading, typing (with typos), flanking, evading, using gadgets |
 | `src/scene.js`, `src/avatar.js`, `src/effects.js`, `src/render.js` | three.js visuals |
 | `src/hud.js`, `src/ui.js`, `src/style.css`, `src/body.html` | HUD and menus |
-| `src/net.js`, `src/session.js` | Online rooms (host and client) |
+| `src/net.js`, `src/session.js` | Online rooms (host and client), including spectators |
+| `src/packs.js`, `src/lingo.js`, `src/theme.js` | Optional map packs, their words and their look |
 | `src/audio.js` | Every sound effect, synthesised live with WebAudio (no audio files) |
 | `src/input.js` | Keyboard, mouse and touch |
 | `build.mjs` | Bundles everything (code, styles, fonts) into one HTML file, `docs/index.html` |
@@ -113,11 +116,17 @@ The simulation (`game.js`, `world.js`, `bot.js`, `maps.js`, `config.js`) has no 
 
 Maps are lists of boxes. Add a function to `src/maps.js` that returns the same shape as the others, register it in `MAPS` and `MAP_LIST`, and the navigation grid, minimap and collision are generated from it automatically. Run `npm run sim -- dm yourmap 8` to check the bots can get around.
 
+### Map packs
+
+A page that hosts the game can add its own map without changing the code: a small script that runs before the game registers a *pack* on `globalThis.NumbskullPacks`. A pack has a map (built with the same helpers as the built-in maps), and can add pictures for signs and floor markings, a matching menu and HUD style, new words for the kill feed and scoreboard, and its own bot names. A pack can also be secret: its map only shows up after someone types the pack's word on the home screen, or taps the title seven times on a phone. See `src/packs.js` for the format, and `src/lingo.js` and `src/theme.js` for what a theme can change.
+
+Online, everyone in a room needs the same packs as the host, so they should open the game from the same page. Anyone without the pack gets a message saying so.
+
 ## Online play
 
 Online rooms are peer-to-peer. The host's browser runs the match (bots, rules and kill checks) and every other player connects straight to it over WebRTC. [PeerJS](https://peerjs.com) is used only to introduce the browsers to each other, through its free public server.
 
-- Rooms hold up to 20 players including bots. People can join a match already in progress (in Battle Royale they spectate until the next round).
+- Rooms hold up to 20 players including bots, plus up to 12 spectators. People can join a match already in progress (in Battle Royale they spectate until the next round).
 - **Play online** uses a set of numbered public rooms. You join the lowest-numbered room with space; if it doesn't exist yet, your browser opens it and becomes the host. When a public host leaves, everyone in that room is moved to another one automatically, and a host left alone in an overflow room moves into the main one between rounds.
 - A host keeps the match running even if they switch to another tab.
 - If the host of a private room leaves, the room closes.

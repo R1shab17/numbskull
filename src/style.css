@@ -188,6 +188,13 @@ table.res tr.me td { background: rgba(23,20,31,.1); font-weight: 700; }
 .spec-btns button:hover { background: rgba(255,255,255,.18); }
 .spec-btns #specPrev, .spec-btns #specNext { flex: 0 0 52px; font-size: 1.4rem; line-height: 1; }
 .spec-btns button.on { background: var(--note); color: var(--ink); border-color: var(--note); }
+.spec-btns #specJoin { background: var(--note-mint); color: var(--ink); border-color: var(--note-mint); }
+.plist li.watching { background: rgba(255,255,255,.35); }
+.plist li .tag.watch { background: transparent; color: var(--ink); border: 2px solid var(--ink); }
+.join-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.champ { display: flex; align-items: center; gap: 10px; background: linear-gradient(90deg, var(--note), transparent); color: var(--ink); border-radius: 10px; padding: 6px 12px; font-weight: 700; }
+.champ b { font-family: var(--f-display); font-weight: 400; }
+#scoreboard .watchers { font-size: .8rem; opacity: .75; }
 .spec-hint { font-size: .75rem; opacity: .65; text-align: center; }
 body.touch .spec-hint { display: none; }
 #hud.spectating #typebar, #hud.spectating #mynote, #hud.spectating #gadgets, #hud.spectating #crosshair, #hud.spectating #death, #hud.spectating #zonewarn { display: none; }

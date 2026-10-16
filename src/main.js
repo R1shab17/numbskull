@@ -7,17 +7,15 @@ import { UI } from './ui.js';
 import { audio } from './audio.js';
 import { Game } from './game.js';
 import { HostSession, ClientSession } from './session.js';
-import { MAP_LIST } from './maps.js';
+import { loadPacks, packImagesReady, pickableMaps, packForMap, builtInMaps } from './packs.js';
+import { applyTheme } from './theme.js';
+import { say } from './lingo.js';
 
 const pick = (a) => a[Math.floor(Math.random() * a.length)];
 const angDiff = (a, b) => { let d = b - a; while (d > Math.PI) d -= Math.PI * 2; while (d < -Math.PI) d += Math.PI * 2; return d; };
 const store = {
   get(k, d) { try { const v = localStorage.getItem('numbskull.' + k); return v ? { ...d, ...JSON.parse(v) } : { ...d }; } catch { return { ...d }; } },
   set(k, v) { try { localStorage.setItem('numbskull.' + k, JSON.stringify(v)); } catch { /* storage blocked */ } },
-};
-const MISS_TEXT = {
-  nobody: "Nobody has that number", sight: "They're not in sight", self: "That's your own number", team: "That's a teammate",
-  protected: "They're shielded for a moment", decoy: "That was a decoy", wait: 'Not yet!',
 };
 
 class SoloSession {
@@ -37,7 +35,7 @@ class App {
     this.settings = store.get('settings', { sens: 1, fov: CFG.fov, volume: 0.7, quality: coarse ? 1 : 2, scale: coarse ? 0.85 : 1, invertY: false, watchWarn: true, announcer: true, showFps: false, touch: 'auto' });
     this.match = store.get('match', { mode: 'dm', mapId: 'plaza', bots: 7, difficulty: 'normal', digits: 4, scoreLimit: 20, timeLimit: 300, lives: 2 });
     if (!MODES[this.match.mode]) this.match.mode = 'dm';
-    if (!MAP_LIST.some(m => m.id === this.match.mapId)) this.match.mapId = 'plaza';
+    if (!pickableMaps().some(m => m.id === this.match.mapId)) this.match.mapId = 'plaza';
     this.previewNum = String(1000 + Math.floor(Math.random() * 9000));
     this.canvas = document.getElementById('gl');
     this.renderer = new Renderer(this.canvas);
@@ -48,6 +46,7 @@ class App {
     this.state = 'menu';
     this.session = null;
     this.game = null;
+    this.watching = false; // in a room as a spectator rather than a player
     this.buffer = '';
     this.pending = false;
     this.chatOpen = false;
@@ -73,6 +72,7 @@ class App {
     document.getElementById('specNext').addEventListener('click', () => this.specCycle(1));
     document.getElementById('specView').addEventListener('click', () => this.specToggle());
     document.getElementById('specFast').addEventListener('click', () => { this.fast = !this.fast; });
+    document.getElementById('specJoin').addEventListener('click', () => this.jumpIn());
     addEventListener('pagehide', () => { try { this.session?.close(); } catch { /* closing anyway */ } });
     // Browsers pause hidden tabs. A host keeps the match running for everyone from a worker timer.
     try {
@@ -107,9 +107,9 @@ class App {
   }
 
   // ---------------------------------------------------------------- flow
-  startAttract() {
+  startAttract(mapId) {
     this.game = null;
-    const mapId = pick(['plaza', 'depot', 'neon']);
+    mapId = mapId || pick(builtInMaps()).id;
     const g = new Game({ mapId, mode: Math.random() < 0.5 ? 'dm' : 'tdm', attract: true, difficulty: 'hard', digits: 4, timeLimit: 99999 });
     g.addBots(10);
     g.balanceTeams();
@@ -138,9 +138,9 @@ class App {
     this.session.open();
   }
 
-  joinRoom(code) {
+  joinRoom(code, watch = false) {
     this.session?.close();
-    this.session = new ClientSession(this);
+    this.session = new ClientSession(this, { watch });
     this.session.join(code);
   }
 
@@ -184,6 +184,7 @@ class App {
     this.attract = null;
     this.game = game;
     game.on((ev) => this.onEvent(ev));
+    applyTheme(packForMap(game.mapId));
     this.renderer.setQuality(this.settings.quality, this.settings.scale);
     this.renderer.load(game);
     const me = game.local;
@@ -201,6 +202,7 @@ class App {
     this.input.enabled = true;
     this.input.zoomToggle = false;
     this.applySettings();
+    if (this.watching) { this.enterSpectate(); setTimeout(() => this.hud.center('You are watching. Press Jump in whenever you want to play.', '', 3.5), 300); return; }
     if (!this.touchMode) this.input.lock(false);
     if (game.teams && me) setTimeout(() => this.hud.center(`You're on ${TEAM_NAME[me.team]}`, '', 2.5), 300);
     if (game.br && me) setTimeout(() => this.hud.center(me.out ? 'Round in progress. You can watch until the next one starts.' : `Battle Royale · ${game.lives > 1 ? game.lives + ' notes each · ' : ''}last head standing wins`, '', 3.5), 300);
@@ -208,12 +210,46 @@ class App {
 
   endMatchView() {
     this.spec = null; this.fast = false; this.input.noLock = false;
+    this.watching = false;
     this.input.enabled = false;
     this.input.unlock();
     this.hud.show(false);
     document.getElementById('touch').hidden = true;
     document.body.classList.remove('touch', 'playing');
     this.startAttract();
+    applyTheme(null);
+  }
+
+  // The look follows the map: the match being played, or the map picked in setup / the lobby.
+  // The menu background switches to that map too.
+  refreshTheme() {
+    if (this.game) return;
+    const cur = this.ui.cur;
+    const mapId = cur === 'setup' ? this.match.mapId : cur === 'lobby' ? this.ui.data?.settings?.mapId : null;
+    const pack = mapId ? packForMap(mapId) : null;
+    const changed = applyTheme(pack);
+    const want = pack ? pack.mapId : null;
+    const have = this.attract ? (packForMap(this.attract.mapId) ? this.attract.mapId : null) : null;
+    if (want !== have) this.startAttract(want || undefined);
+    return changed;
+  }
+
+  // watcher -> player (the host added us to the match)
+  becomePlayer(id) {
+    const g = this.game;
+    if (!g) return;
+    g.localId = id;
+    const me = g.players.get(id);
+    if (me) me.remote = false;
+    this.watching = false;
+    this.renderer.setViewmodelColors(me && g.teams ? TEAM_COLOR[me.team] : this.profile.shirt, this.profile.skin);
+    this.hud.center(g.br && me && me.out ? "You're in! You'll play from the next round." : "You're in!", 'good', 2.5);
+    audio.pickup();
+  }
+
+  jumpIn() {
+    if (!this.watching || !this.session || !this.game) return;
+    this.session.jumpInRequest?.();
   }
 
   abandonMatch() {
@@ -403,13 +439,13 @@ class App {
           r.effects?.poof(hx, hy, hz, v.team ? TEAM_COLOR[v.team] : v.shirt);
           if (ev.v !== me) audio.killAt([hx, hy, hz]);
         }
-        if (ev.zone) this.hud.feed(`${this.hud.name(v)} got caught by the zone`, ev.v === me);
+        if (ev.zone) this.hud.feed(esc(say('zoneFeed', { name: '\u0000' })).replace('\u0000', this.hud.name(v)), ev.v === me);
         else this.hud.killFeed(a, v, ev.code, ev.a === me || ev.v === me);
         if (g.br && ev.v !== me && g.phase === 'play') { const left = g.aliveCount(); if (left > 1 && left <= 5) this.hud.center(`${left} left`, '', 1.4); }
         if (ev.a === me) {
           clearTimeout(this.pendingT); this.pending = false;
           this.hud.setBuffer(this.buffer, 'hit');
-          this.hud.flashResult('hit', `Read ${v ? v.name : ''}!${ev.dist > 40 ? ` ${ev.dist} m away` : ''}`);
+          this.hud.flashResult('hit', say(ev.dist > 40 ? 'hitFar' : 'hit', { name: v ? v.name : '', dist: ev.dist }));
           this.buffer = '';
           audio.kill();
           const s = a.streak;
@@ -431,20 +467,20 @@ class App {
           this.renderer.effects?.confetti(hx, hy, hz, 36, ['#ffe45c', '#ff9ecb', '#7ef0c8', '#ffffff'], 3.5);
           if (ev.v !== me) audio.bounce([hx, hy, hz]);
         }
-        this.hud.feed(`${this.hud.name(a)}<span class="code">${esc(ev.code)}</span>${this.hud.name(v)} <span style="opacity:.7">note ripped</span>`, ev.a === me || ev.v === me);
+        this.hud.feed(`${this.hud.name(a)}<span class="code">${esc(ev.code)}</span>${this.hud.name(v)} <span style="opacity:.7">${esc(say('peelFeed'))}</span>`, ev.a === me || ev.v === me);
         if (ev.a === me) {
           clearTimeout(this.pendingT); this.pending = false;
-          this.hud.flashResult('hit', `Ripped ${v ? v.name : 'their'}'s note off. New number underneath!`);
+          this.hud.flashResult('hit', say('peelHit', { name: v ? v.name : 'their' }));
           this.buffer = '';
           audio.pickup();
         }
-        if (ev.v === me) { this.hud.center(`Note ripped off! New number: ${ev.num}`, 'bad', 2.4); audio.jam(); }
+        if (ev.v === me) { this.hud.center(say('peeled', { num: ev.num }), 'bad', 2.4); audio.jam(); }
         break;
       }
       case 'miss':
         if (ev.id === me) {
           clearTimeout(this.pendingT); this.pending = false;
-          this.hud.flashResult('miss', MISS_TEXT[ev.reason] || 'Miss');
+          this.hud.flashResult('miss', say('miss_' + ev.reason) === 'miss_' + ev.reason ? say('miss') : say('miss_' + ev.reason));
           this.buffer = '';
           if (ev.reason === 'sight') audio.notInSight(); else audio.miss();
         }
@@ -495,7 +531,7 @@ class App {
         break;
       }
       case 'phase':
-        if (ev.phase === 'play') { this.hud.big('GO!'); audio.countdown(true); }
+        if (ev.phase === 'play') { this.hud.big(say('go')); audio.countdown(true); }
         if (ev.phase === 'end') this.onMatchEnd(ev.results);
         break;
       case 'join':
@@ -506,11 +542,15 @@ class App {
         break;
       case 'chat': {
         const p = P(ev.id);
-        // in Battle Royale, knocked-out players only talk to each other
+        // in Battle Royale, knocked-out players and spectators only talk to each other
         if (ev.dead && g.local && g.local.alive && g.phase === 'play') break;
-        this.hud.chat(p ? (ev.dead ? p.name + ' (out)' : p.name) : '?', ev.msg, p?.team);
+        const who = p ? p.name : ev.name || g.watchers.find(w => w.id === ev.id)?.name || '?';
+        this.hud.chat(ev.watch ? who + ' (watching)' : ev.dead ? who + ' (out)' : who, ev.msg, p?.team);
         break;
       }
+      case 'watch':
+        this.hud.watchers(g.watchers);
+        break;
     }
   }
 
@@ -518,7 +558,7 @@ class App {
     const g = this.game;
     const me = g.local;
     const won = results.teams ? me && me.team === results.winner : results.winner === g.localId;
-    this.hud.big(won ? (results.br ? 'LAST HEAD STANDING' : 'YOU WIN') : 'MATCH OVER');
+    this.hud.big(won ? say(results.br ? 'brWin' : 'win') : say('over'));
     if (won) audio.win(); else audio.lose();
     this.state = 'end';
     document.body.classList.remove('playing');
@@ -724,12 +764,12 @@ class App {
         const me = this.game.local;
         const gm = this.game;
         const specNow = gm.br && me && !me.alive && (me.out || me.spawned) && (me.deathT == null || gm.time - me.deathT > 2.6) && (this.state === 'play' || this.state === 'paused');
-        if (specNow && !this.spec) this.enterSpectate();
+        if ((specNow || (this.watching && (this.state === 'play' || this.state === 'paused'))) && !this.spec) this.enterSpectate();
         if (this.spec && me && me.alive) { this.spec = null; this.input.noLock = false; }
         if (this.spec) { this.view.mode = this.spec.god || !this.spec.target ? 'spec-god' : 'spec-follow'; this.view.spec = this.spec; }
         else this.view.mode = me && me.alive ? 'fp' : me && me.deathPos ? 'death' : 'wait';
         this.hud.update(dt, this.game, me, this.view);
-        this.hud.spectator(gm, this.view, this.spec ? { target: gm.players.get(this.spec.target), late: me && !me.spawned, canFast: this.session?.type === 'solo', fast: this.fast } : null);
+        this.hud.spectator(gm, this.view, this.spec ? { target: gm.players.get(this.spec.target), late: me && !me.spawned, watching: this.watching, canJoin: this.watching && this.session?.type !== 'solo' && gm.phase !== 'end', canFast: this.session?.type === 'solo', fast: this.fast } : null);
         this.updateWatch(dt);
         const showScore = this.state === 'play' && (this.input.state().score || this.touchScore);
         this.hud.scoreboard(this.game, showScore);
@@ -766,6 +806,9 @@ async function boot() {
   try {
     // let the embedded fonts settle so canvas-drawn notes and signs use them
     if (document.fonts) await Promise.race([Promise.all(['100px "Permanent Marker"', '40px "Dela Gothic One"', '16px "Atkinson Hyperlegible"'].map(f => document.fonts.load(f))).catch(() => {}), new Promise(r => setTimeout(r, 1200))]);
+    // optional map packs added by the page hosting the game (see packs.js)
+    loadPacks();
+    await packImagesReady();
     window.numbskull = new App();
   } catch (e) {
     console.error(e);
