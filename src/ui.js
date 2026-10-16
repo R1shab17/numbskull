@@ -275,6 +275,7 @@ export class UI {
     $('#jForm').addEventListener('submit', (e) => { e.preventDefault(); go(false); });
     $('#jWatch').addEventListener('click', () => go(true));
   }
+  joinStatus(msg) { if (this.cur === 'join') $('#jMsg').textContent = msg; }
   joinError(msg) { if (this.cur === 'join') { $('#jMsg').textContent = msg; $('#jGo').disabled = false; $('#jWatch').disabled = false; } else { this.go('join'); setTimeout(() => this.joinError(msg), 0); } }
 
   // ---------------------------------------------------------------- lobby

@@ -12,6 +12,19 @@ const lobbyView = (p) => ({ id: p.id, name: p.name, shirt: p.shirt, host: p.host
 
 export const publicId = (slot) => PUBLIC_PREFIX + slot;
 
+// A random id for this browser tab, kept across reloads of the tab. If our connection drops
+// and we join again, the host recognises us and gives us back our place.
+let TAB_ID = null;
+function tabId() {
+  if (TAB_ID) return TAB_ID;
+  try { TAB_ID = sessionStorage.getItem('numbskull.tab'); } catch { /* storage blocked */ }
+  if (!TAB_ID) {
+    TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    try { sessionStorage.setItem('numbskull.tab', TAB_ID); } catch { /* storage blocked */ }
+  }
+  return TAB_ID;
+}
+
 const SNAP_RATE = 1 / NET.snapRate;
 const STATE_RATE = 1 / NET.stateRate;
 
@@ -45,6 +58,14 @@ export class HostSession {
       },
       onTaken: () => { this.net = null; this.onTaken?.(); },
       onError: (msg) => { app.ui.go('message', { title: "Couldn't open a room", text: msg }); this.close(true); },
+      onRetry: (n) => { if (!this.public && app.ui.cur === 'message') app.ui.go('message', { title: 'Opening your room…', text: `The matchmaking server is slow to answer. Trying again (${n} of 3)…`, busy: true }); },
+      // the matchmaking server dropped out: the match carries on, only new joins wait
+      onSignal: (online) => {
+        if (online) { clearTimeout(this.signalT); this.signalT = null; if (this.signalDown) app.ui.toast('Back online: new players can join again.'); this.signalDown = false; return; }
+        if (this.signalT || this.signalDown) return;
+        // short blips are fixed before anyone notices; only mention longer ones
+        this.signalT = setTimeout(() => { this.signalT = null; this.signalDown = true; app.ui.toast("The matchmaking server dropped out. Everyone here keeps playing; new players can join once it's back.", 5000); }, 4000);
+      },
       onConnect: () => {},
       onData: (conn, msg) => this.onData(conn, msg),
       onClose: (conn) => this.onLeave(conn),
@@ -151,6 +172,22 @@ export class HostSession {
     const pid = this.byConn.get(conn);
     if (msg.t === 'hello') {
       if (msg.ver !== NET_VERSION) { this.net.send(conn, { t: 'reject', reason: 'Your copy of Numbskull is a different version from the host. Refresh both pages and try again.' }); setTimeout(() => this.net.kick(conn), 300); return; }
+      // the same browser tab coming back after its connection dropped: give it its old place
+      // (same name, same score) instead of adding a second copy of that player
+      const cid = typeof msg.cid === 'string' ? msg.cid.slice(0, 40) : null;
+      const old = cid && this.lobby.find(p => p.cid === cid && p.conn && p.conn !== conn);
+      if (old) {
+        this.byConn.delete(old.conn);
+        old.conn._gone = true;
+        this.net.kick(old.conn);
+        old.conn = conn;
+        this.byConn.set(conn, old.id);
+        if (this.inGame && game) {
+          if (!old.watch && !game.players.has(old.id)) { const p = game.addPlayer({ id: old.id, ...this.profileInfo(old), remote: true }); game.emit({ k: 'join', p: game.playerInit(p) }); }
+          this.net.send(conn, { t: 'start', state: game.fullState(), you: old.id, watch: !!old.watch });
+        } else this.broadcastLobby();
+        return;
+      }
       const watch = !!msg.watch && !this.public;
       const count = watch ? this.watcherCount() : this.inGame && game ? [...game.players.values()].filter(p => !p.isBot).length : this.playerCount();
       if (count >= (watch ? MAX_WATCHERS : MAX_PLAYERS)) { this.net.send(conn, { t: 'reject', reason: watch ? 'That room already has as many spectators as it can take.' : 'That room is full.', full: true }); setTimeout(() => this.net.kick(conn), 300); return; }
@@ -163,7 +200,7 @@ export class HostSession {
       if (game) for (const p of game.players.values()) names.add(p.name);
       let nm = info.name, k = 2; while (names.has(nm)) nm = `${info.name.slice(0, 13)} ${k++}`;
       info.name = nm;
-      this.lobby.push({ id, ...info, conn, watch });
+      this.lobby.push({ id, ...info, conn, watch, cid });
       this.byConn.set(conn, id);
       if (this.inGame && game && watch) {
         // watch the running match
@@ -302,13 +339,21 @@ export class ClientSession {
     const app = this.app;
     this.code = code ? code.toUpperCase() : null;
     if (!onlineSupported()) { if (this.public) this.onFail?.('error', "Online play can't run on this page."); else app.ui.joinError("Online rooms can't run on this page. Open Numbskull from its own page to join."); return; }
-    this.net = new ClientNet({
-      onOpen: () => this.net.send({ t: 'hello', ver: NET_VERSION, watch: this.watch, profile: { name: app.profile.name, shirt: app.profile.shirt, skin: app.profile.skin, hat: app.profile.hat } }),
-      onData: (m) => this.onData(m),
+    this.connect();
+  }
+
+  connect() {
+    const app = this.app;
+    this.net?.close();
+    const net = this.net = new ClientNet({
+      onOpen: () => { this.rejoining = false; net.send({ t: 'hello', ver: NET_VERSION, cid: tabId(), watch: this.watch, profile: { name: app.profile.name, shirt: app.profile.shirt, skin: app.profile.skin, hat: app.profile.hat } }); },
+      onData: (m) => { if (this.net === net) this.onData(m); },
+      onRetry: (n) => { if (!this.public && !this.inGame && app.ui.cur === 'join') app.ui.joinStatus(`The matchmaking server is slow to answer. Trying again (${n} of 3)…`); },
       onError: (msg, kind) => {
-        if (this.closed) return;
+        if (this.closed || this.net !== net) return;
+        if (this.rejoining) { this.rejoining = false; this.lost(kind === 'peer-unavailable' ? 'The host closed the room or lost their connection.' : 'The connection to the host dropped and reconnecting failed.'); this.close(); return; }
         if (this.public && !this.inGame) {
-          this.closed = true; this.net.close();
+          this.closed = true; net.close();
           const fatal = ['network', 'server-error', 'socket-error', 'socket-closed', 'browser-incompatible', 'ssl-unavailable'];
           this.onFail?.(kind === 'peer-unavailable' ? 'unavailable' : fatal.includes(kind) ? 'error' : 'timeout', msg);
           return;
@@ -316,10 +361,23 @@ export class ClientSession {
         if (this.inGame) this.lost(msg); else app.ui.joinError(msg);
         this.close();
       },
-      onClose: () => { if (!this.closed) this.lost('The host closed the room or the connection dropped.'); },
+      onClose: () => {
+        if (this.closed || this.net !== net) return;
+        // a private room: try to get back in (the host keeps our place for a few seconds)
+        if (!this.public && (this.rejoins || 0) < 2) { this.rejoin(); return; }
+        this.lost('The host closed the room or the connection dropped.');
+      },
     });
-    if (this.public) this.net.start(null, publicId(this.slot), 12000);
-    else this.net.start(this.code);
+    if (this.public) net.start(null, publicId(this.slot), 12000);
+    else net.start(this.code);
+  }
+
+  rejoin() {
+    this.rejoins = (this.rejoins || 0) + 1;
+    this.rejoining = true;
+    this.seen = performance.now();
+    this.app.ui.toast('Connection to the host dropped. Reconnecting…', 4000);
+    this.connect();
   }
 
   lost(text) {
@@ -344,6 +402,7 @@ export class ClientSession {
       case 'closed': this.lost('The host closed the room.'); break;
       case 'lobby':
         this.lobbyData = m;
+        this.rejoins = 0;
         if (!this.inGame) app.ui.go('lobby', { host: false, code: this.code, you: this.id, players: m.players, settings: m.settings });
         break;
       case 'tolobby':
@@ -353,6 +412,7 @@ export class ClientSession {
         break;
       case 'start': {
         this.id = m.you;
+        this.rejoins = 0;
         const s = m.state;
         if (!MAPS[s.opts.mapId]) {
           // the host picked a map that only exists on another copy of the game
@@ -387,7 +447,10 @@ export class ClientSession {
     const now = performance.now();
     if (this.lastTick && now - this.lastTick > 2500 && this.seen) this.seen = now; // we were frozen, not the host
     this.lastTick = now;
-    if (this.seen && now - this.seen > 10000 && !this.closed) { this.lost('Lost contact with the host.'); this.close(); return; }
+    if (this.seen && now - this.seen > 10000 && !this.closed && !this.rejoining) {
+      if (!this.public && (this.rejoins || 0) < 2) { this.rejoin(); return; }
+      this.lost('Lost contact with the host.'); this.close(); return;
+    }
     this.pingT -= dt;
     if (this.pingT <= 0 && this.net) { this.pingT = 2; this.net.send({ t: 'ping', c: performance.now() }); }
     const game = this.app.game;

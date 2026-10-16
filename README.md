@@ -129,9 +129,16 @@ Online rooms are peer-to-peer. The host's browser runs the match (bots, rules an
 - Rooms hold up to 20 players including bots, plus up to 12 spectators. People can join a match already in progress (in Battle Royale they spectate until the next round).
 - **Play online** uses a set of numbered public rooms. You join the lowest-numbered room with space; if it doesn't exist yet, your browser opens it and becomes the host. When a public host leaves, everyone in that room is moved to another one automatically, and a host left alone in an overflow room moves into the main one between rounds.
 - A host keeps the match running even if they switch to another tab.
-- If the host of a private room leaves, the room closes.
-- A few very strict networks (some offices and schools) block direct browser-to-browser connections. Playing from home networks and phones normally works.
+- If the host of a private room leaves, the room closes. If a player's connection drops, their browser reconnects by itself and they get their place and name back.
+- The matchmaking server is only needed to introduce browsers. If it drops out, matches carry on and the host reconnects in the background; only new joins wait for it.
+- When two networks won't connect directly, traffic goes through a free public relay (PeerJS's own, with [Metered's Open Relay Project](https://www.metered.ca/tools/openrelay/) as a backup). A few very strict networks (some offices and schools) block even that.
 - Online rooms don't work when the game is embedded somewhere that blocks WebRTC. Hosting the page yourself avoids that.
+
+To add your own relay (TURN server), set this before the game script. It's tried first:
+
+```html
+<script>window.NUMBSKULL_ICE = [{ urls: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' }];</script>
+```
 
 To use your own signalling server instead of the public one:
 
