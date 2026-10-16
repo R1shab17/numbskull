@@ -13,10 +13,15 @@ const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 
 // How browsers find a route to each other. Most pairs connect directly (STUN tells each
 // browser its public address). When a network blocks that, traffic goes through a relay
-// (TURN). Two free public relays are listed so that one being down doesn't stop play:
-// PeerJS's own, and Metered's Open Relay Project, whose shared secret is published for
-// public use and turned into short-lived credentials below. A page can add its own relay
-// first with window.NUMBSKULL_ICE = [{ urls, username, credential }, ...].
+// (TURN). Numbskull's own relay (a Metered account) is tried first once its login is filled
+// in: it also answers on ports 80 and 443, which strict office and school networks usually
+// leave open. Browsers need the login to use it, so anyone can read it from the page. Two
+// free public relays back it up: PeerJS's own, and Metered's Open Relay Project, whose shared
+// secret is published for public use and turned into short-lived credentials below. A page
+// can add its own relay first with window.NUMBSKULL_ICE = [{ urls, username, credential }, ...].
+const RELAY_HOST = 'global.relay.metered.ca';
+const RELAY_LOGIN = { username: '7d4bb7f6fd51134a0b4d1f39', credential: 'G8NjUmVU1s5RvNlM' };
+const RELAY = RELAY_LOGIN.username ? [{ urls: [`turn:${RELAY_HOST}:80`, `turn:${RELAY_HOST}:80?transport=tcp`, `turn:${RELAY_HOST}:443`, `turns:${RELAY_HOST}:443?transport=tcp`], ...RELAY_LOGIN }] : [];
 const PEERJS_TURN = { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' };
 const STUN = { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] };
 let openRelay = null;
@@ -33,7 +38,7 @@ try { if (globalThis.crypto && crypto.subtle) makeOpenRelay().then((r) => { open
 function iceServers() {
   let extra = [];
   try { if (Array.isArray(window.NUMBSKULL_ICE)) extra = window.NUMBSKULL_ICE.filter(x => x && x.urls); } catch { /* ignore */ }
-  return [...extra, STUN, PEERJS_TURN, ...(openRelay ? [openRelay] : [])];
+  return [...extra, STUN, ...RELAY, PEERJS_TURN, ...(openRelay ? [openRelay] : [])];
 }
 
 // Optional self-hosted signalling server: ?signal=https://your-peer-server.example/path

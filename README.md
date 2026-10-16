@@ -134,7 +134,9 @@ Online rooms are peer-to-peer. The host's browser runs the match (bots, rules an
 - When two networks won't connect directly, traffic goes through a free public relay (PeerJS's own, with [Metered's Open Relay Project](https://www.metered.ca/tools/openrelay/) as a backup). A few very strict networks (some offices and schools) block even that. When a join fails this way, the message says whose network couldn't reach a relay, so the right person can switch to another network (a phone hotspot works).
 - Online rooms don't work when the game is embedded somewhere that blocks WebRTC. Hosting the page yourself avoids that.
 
-To add your own relay (TURN server), set this before the game script. It's tried first:
+To use your own [Metered](https://www.metered.ca/) relay, put its username and credential in `RELAY_LOGIN` in `src/net.js` and rebuild. It's tried before the free public relays, and it also works over ports 80 and 443, which most office and school networks leave open. Browsers need the login to use the relay, so anyone who opens the game can read it: set a usage limit in your Metered dashboard.
+
+To add any other relay (TURN server), set this before the game script. It's tried first:
 
 ```html
 <script>window.NUMBSKULL_ICE = [{ urls: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' }];</script>
