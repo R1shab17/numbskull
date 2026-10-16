@@ -275,6 +275,22 @@ export class Game {
     return !this.world.segmentBlocked(ex, ey, ez, hx, hy, hz, true);
   }
 
+  // Could s make out t's number now or in a moment? Online, a player's browser is only sent the
+  // numbers that pass this, so there's nothing to dig out of it. It's generous (a wide view cone,
+  // a little extra range) so a number arrives before it's legible, even after a quick turn.
+  mayRead(s, t) {
+    if (!s.alive || !t.alive) return false;
+    const [ex, ey, ez] = this.eye(s), [hx, hy, hz] = this.forehead(t);
+    const dx = hx - ex, dz = hz - ez, d = Math.hypot(dx, hy - ey, dz);
+    const near = d <= CFG.killRange + 6;
+    if (!near && !(s.zoom && d <= CFG.binoRange + 6)) return false;
+    if (this.facing(t, s) < -0.25) return false; // the back of their head
+    // up close anything but right behind you; far away only roughly where the binoculars point
+    const ahead = (-Math.sin(s.yaw) * dx - Math.cos(s.yaw) * dz) / (Math.hypot(dx, dz) || 1);
+    if (ahead < (near ? -0.35 : 0.9)) return false;
+    return !this.world.segmentBlocked(ex, ey, ez, hx, hy, hz, true);
+  }
+
   // how much of t's note faces s (1 = straight on, <0 = back of head)
   facing(t, s) {
     const dx = s.x - t.x, dz = s.z - t.z;

@@ -131,12 +131,15 @@ export class Renderer {
     let a = this.avatars.get(p.id);
     if (!a) {
       a = new Avatar({ shirt: p.shirt, skin: p.skin, hat: p.hat, team: p.team, name: p.name });
-      a.setNumber(p.num);
+      a.setNumber(this.noteText(p));
       this.scene.add(a.root);
       this.avatars.set(p.id, a);
     }
     return a;
   }
+
+  // online, a number we haven't been sent yet (too far, behind a wall) shows as dots
+  noteText(p) { return p.num || '·'.repeat(this.game?.digits || 4); }
 
   removeAvatar(id) {
     const a = this.avatars.get(id);
@@ -197,7 +200,7 @@ export class Renderer {
     for (const p of g.players.values()) {
       const a = this.ensureAvatar(p);
       if (a.team !== p.team) a.setTeam(p.team);
-      a.setNumber(p.num);
+      a.setNumber(this.noteText(p));
       a.setNotes(p.notes || 1);
       const isMe = p.id === g.localId && view.mode === 'fp';
       a.setVisible(p.alive && !isMe);

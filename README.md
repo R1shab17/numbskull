@@ -126,6 +126,7 @@ Online, everyone in a room needs the same packs as the host, so they should open
 
 Online rooms are peer-to-peer. The host's browser runs the match (bots, rules and kill checks) and every other player connects straight to it over WebRTC. [PeerJS](https://peerjs.com) is used only to introduce the browsers to each other, through its free public server.
 
+- Numbers are need-to-know: the host only sends a player the numbers they could read right now (close enough, facing them, nothing in the way), plus their own and their teammates'. Everything else stays blank in their browser, so there's nothing to dig out with developer tools. Spectators and knocked-out players see every number.
 - Rooms hold up to 20 players including bots, plus up to 12 spectators. People can join a match already in progress (in Battle Royale they spectate until the next round).
 - **Play online** uses a set of numbered public rooms. You join the lowest-numbered room with space; if it doesn't exist yet, your browser opens it and becomes the host. When a public host leaves, everyone in that room is moved to another one automatically, and a host left alone in an overflow room moves into the main one between rounds.
 - A host keeps the match running even if they switch to another tab.

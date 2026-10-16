@@ -12,6 +12,17 @@ const lobbyView = (p) => ({ id: p.id, name: p.name, shirt: p.shirt, host: p.host
 
 export const publicId = (slot) => PUBLIC_PREFIX + slot;
 
+// Forehead numbers are need-to-know, so nobody can read them out of their browser. Events that
+// carry one go out with it blanked, except to its owner and to spectators, and revealNumbers()
+// hands each player the numbers they could actually read (Game.mayRead).
+const numOwner = (e) => (e.k === 'spawn' || e.k === 'miss' ? e.id : e.k === 'peel' ? e.v : e.k === 'join' ? e.p?.id : null);
+function hideNum(e) {
+  if (e.k === 'spawn' || e.k === 'peel') return { ...e, num: '' };
+  if (e.k === 'join') return { ...e, p: { ...e.p, state: { ...e.p.state, num: '' } } };
+  if (e.k === 'miss') { const { code, ...rest } = e; return rest; } // a wrong guess can still be someone's number
+  return e;
+}
+
 // A random id for this browser tab, kept across reloads of the tab. If our connection drops
 // and we join again, the host recognises us and gives us back our place.
 let TAB_ID = null;
@@ -153,8 +164,55 @@ export class HostSession {
     game.balanceTeams();
     this.inGame = true;
     app.beginMatch(game);
-    const state = game.fullState();
-    for (const lp of this.lobby) if (lp.conn) this.net.send(lp.conn, { t: 'start', state, you: lp.id, watch: !!lp.watch });
+    for (const lp of this.lobby) if (lp.conn) this.sendStart(lp);
+  }
+
+  // spectators (and players knocked out of a Battle Royale) see everyone's number
+  seesAll(lp) {
+    const p = this.app.game?.players.get(lp.id);
+    return !!lp.watch || !p || !!p.out;
+  }
+
+  sendStart(lp) {
+    const state = this.app.game.fullState();
+    lp.known = new Map(); // numbers this player's browser has been sent
+    if (this.seesAll(lp)) { for (const pi of state.players) if (pi.state.num) lp.known.set(pi.id, pi.state.num); }
+    else state.players = state.players.map(pi => (pi.id === lp.id ? pi : { ...pi, state: { ...pi.state, num: '' } }));
+    this.net.send(lp.conn, { t: 'start', state, you: lp.id, watch: !!lp.watch });
+  }
+
+  sendEvents(evs) {
+    if (!evs.some(e => numOwner(e) != null)) { this.net.broadcast({ t: 'ev', e: evs }); return; }
+    const hidden = evs.map(hideNum);
+    for (const lp of this.lobby) {
+      if (!lp.conn) continue;
+      const known = lp.known || (lp.known = new Map());
+      const all = this.seesAll(lp);
+      for (const e of evs) {
+        const id = numOwner(e);
+        if (id == null || e.k === 'miss') continue;
+        if (all || id === lp.id) known.set(id, e.k === 'join' ? e.p.state?.num : e.num); else known.delete(id);
+      }
+      this.net.send(lp.conn, { t: 'ev', e: all ? evs : evs.map((e, i) => (numOwner(e) === lp.id ? e : hidden[i])) });
+    }
+  }
+
+  // hand each remote player the numbers they could read right now (their own and teammates' always)
+  revealNumbers() {
+    const game = this.app.game;
+    for (const lp of this.lobby) {
+      if (!lp.conn) continue;
+      const known = lp.known || (lp.known = new Map());
+      const me = game.players.get(lp.id), all = this.seesAll(lp);
+      let n = null;
+      for (const t of game.players.values()) {
+        if (!t.alive || !t.num || known.get(t.id) === t.num) continue;
+        if (!all && t.id !== lp.id && !(game.teams && me && t.team === me.team) && !(me && game.mayRead(me, t))) continue;
+        known.set(t.id, t.num);
+        (n || (n = [])).push([t.id, t.num]);
+      }
+      if (n) this.net.send(lp.conn, { t: 'nums', n });
+    }
   }
 
   restart() { this.startMatch(); }
@@ -184,7 +242,7 @@ export class HostSession {
         this.byConn.set(conn, old.id);
         if (this.inGame && game) {
           if (!old.watch && !game.players.has(old.id)) { const p = game.addPlayer({ id: old.id, ...this.profileInfo(old), remote: true }); game.emit({ k: 'join', p: game.playerInit(p) }); }
-          this.net.send(conn, { t: 'start', state: game.fullState(), you: old.id, watch: !!old.watch });
+          this.sendStart(old);
         } else this.broadcastLobby();
         return;
       }
@@ -200,11 +258,12 @@ export class HostSession {
       if (game) for (const p of game.players.values()) names.add(p.name);
       let nm = info.name, k = 2; while (names.has(nm)) nm = `${info.name.slice(0, 13)} ${k++}`;
       info.name = nm;
-      this.lobby.push({ id, ...info, conn, watch, cid });
+      const lp = { id, ...info, conn, watch, cid };
+      this.lobby.push(lp);
       this.byConn.set(conn, id);
       if (this.inGame && game && watch) {
         // watch the running match
-        this.net.send(conn, { t: 'start', state: game.fullState(), you: id, watch: true });
+        this.sendStart(lp);
         this.syncWatchers();
       } else if (this.inGame && game) {
         // drop into the running match, replacing a bot if we're full
@@ -214,7 +273,7 @@ export class HostSession {
         }
         const p = game.addPlayer({ id, ...info, remote: true });
         game.emit({ k: 'join', p: game.playerInit(p) });
-        this.net.send(conn, { t: 'start', state: game.fullState(), you: id });
+        this.sendStart(lp);
       } else this.broadcastLobby();
       return;
     }
@@ -307,11 +366,11 @@ export class HostSession {
     }
     if (!game || !this.net || !this.inGame) return;
     if (game.outEvents.length) {
-      this.net.broadcast({ t: 'ev', e: game.outEvents });
+      this.sendEvents(game.outEvents);
       game.outEvents = [];
     }
     this.snapT -= dt;
-    if (this.snapT <= 0) { this.snapT = SNAP_RATE; this.net.broadcast(game.snapshot()); }
+    if (this.snapT <= 0) { this.snapT = SNAP_RATE; this.net.broadcast(game.snapshot()); this.revealNumbers(); }
   }
 
   // actions from the local player
@@ -431,6 +490,8 @@ export class ClientSession {
         break;
       }
       case 'nojump': app.ui.toast('No room to jump in right now.'); break;
+      // numbers we can now read (see HostSession.revealNumbers)
+      case 'nums': if (app.game && this.inGame && Array.isArray(m.n)) for (const [id, num] of m.n) { const p = app.game.players.get(id); if (p) p.num = String(num); } break;
       case 'ev':
         if (app.game && this.inGame) for (const e of m.e) {
           app.game.applyEvent(e);

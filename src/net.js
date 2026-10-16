@@ -3,7 +3,7 @@
 import { Peer } from 'peerjs';
 
 const PREFIX = 'numbskull-room-v3-';
-export const PUBLIC_PREFIX = 'numbskull-pub-v3-';
+export const PUBLIC_PREFIX = 'numbskull-pub-v4-';
 
 // Messages travel raw: binary snapshots as ArrayBuffers, everything else as JSON text.
 // JSON is encoded once per broadcast instead of once per player.

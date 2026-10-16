@@ -809,7 +809,9 @@ async function boot() {
     // optional map packs added by the page hosting the game (see packs.js)
     loadPacks();
     await packImagesReady();
-    window.numbskull = new App();
+    const app = new App();
+    // kept out of reach of the console unless debugging, so it's not a one-line peek at the game
+    if (window.NUMBSKULL_DEBUG) window.numbskull = app;
   } catch (e) {
     console.error(e);
     document.getElementById('screens').innerHTML = `<section class="screen" style="max-width:520px"><div class="note pink"><h2>Numbskull couldn't start</h2><p>${esc(e.message || String(e))}</p><p>The game needs WebGL. Try another browser or turn on hardware acceleration.</p></div></section>`;
