@@ -7,7 +7,7 @@ import { UI } from './ui.js';
 import { audio } from './audio.js';
 import { Game } from './game.js';
 import { HostSession, ClientSession } from './session.js';
-import { loadPacks, packImagesReady, pickableMaps, packForMap, builtInMaps } from './packs.js';
+import { loadPacks, openSavedPacks, packImagesReady, pickableMaps, packForMap, builtInMaps } from './packs.js';
 import { applyTheme } from './theme.js';
 import { say } from './lingo.js';
 
@@ -474,7 +474,8 @@ class App {
           this.buffer = '';
           audio.pickup();
         }
-        if (ev.v === me) { this.hud.center(say('peeled', { num: ev.num }), 'bad', 2.4); audio.jam(); }
+        // online, our new number arrives just after this (see numberRevealed)
+        if (ev.v === me) { if (ev.num) this.hud.center(say('peeled', { num: ev.num }), 'bad', 2.4); else this.peelPending = true; audio.jam(); }
         break;
       }
       case 'miss':
@@ -573,6 +574,11 @@ class App {
   }
 
   // ---------------------------------------------------------------- spectating (Battle Royale)
+  // the host told us a forehead number (online play only sends the ones we can see)
+  numberRevealed(id, num) {
+    if (this.peelPending && this.game && id === this.game.localId) { this.peelPending = false; this.hud.center(say('peeled', { num }), 'bad', 2.4); }
+  }
+
   aliveList() { return [...this.game.players.values()].filter(p => p.alive).sort((a, b) => a.id - b.id); }
 
   enterSpectate() {
@@ -808,8 +814,11 @@ async function boot() {
     if (document.fonts) await Promise.race([Promise.all(['100px "Permanent Marker"', '40px "Dela Gothic One"', '16px "Atkinson Hyperlegible"'].map(f => document.fonts.load(f))).catch(() => {}), new Promise(r => setTimeout(r, 1200))]);
     // optional map packs added by the page hosting the game (see packs.js)
     loadPacks();
+    try { await openSavedPacks(); } catch { /* opens again once the word is typed */ }
     await packImagesReady();
-    window.numbskull = new App();
+    const app = new App();
+    // handy for testing; left off normally so other players' state isn't one console line away
+    if (window.NUMBSKULL_DEBUG) window.numbskull = app;
   } catch (e) {
     console.error(e);
     document.getElementById('screens').innerHTML = `<section class="screen" style="max-width:520px"><div class="note pink"><h2>Numbskull couldn't start</h2><p>${esc(e.message || String(e))}</p><p>The game needs WebGL. Try another browser or turn on hardware acceleration.</p></div></section>`;

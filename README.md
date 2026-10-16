@@ -131,12 +131,16 @@ Online rooms are peer-to-peer. The host's browser runs the match (bots, rules an
 - A host keeps the match running even if they switch to another tab.
 - If the host of a private room leaves, the room closes. If a player's connection drops, their browser reconnects by itself and they get their place and name back.
 - The matchmaking server is only needed to introduce browsers. If it drops out, matches carry on and the host reconnects in the background; only new joins wait for it.
-- When two networks won't connect directly, traffic goes through a relay. Private rooms try Numbskull's own [Metered](https://www.metered.ca/) relay first, which also works over ports 80 and 443 so most office and school networks let it through. Its free allowance is small, so public rooms skip it. Both then fall back to free public relays (PeerJS's own and [Metered's Open Relay Project](https://www.metered.ca/tools/openrelay/)). A few very strict networks (some offices and schools) block even that. When a join fails this way, the message says whose network couldn't reach a relay, so the right person can switch to another network (a phone hotspot works).
-- Online rooms don't work when the game is embedded somewhere that blocks WebRTC. Hosting the page yourself avoids that.
+- When two networks won't connect directly, traffic goes through a free public relay (PeerJS's own, with [Metered's Open Relay Project](https://www.metered.ca/tools/openrelay/) as a backup). A page can give private rooms a relay of its own to try first (see below). A few very strict networks (some offices and schools) block even that. When a join fails this way, the message says whose network couldn't reach a relay, so the right person can switch to another network (a phone hotspot works).
+- Each player's browser is only told the forehead numbers that player could see from where they stand (plus their own and their team's), so they can't be dug out of the console or the network traffic. Spectators see everyone's. The host's browser runs the match, so it knows every number: play with hosts you trust.
 
-To use your own [Metered](https://www.metered.ca/) relay, put its username and credential in `RELAY_LOGIN` in `src/net.js` and rebuild. Private rooms try it before the free public relays (public rooms skip it to save its allowance), and it also works over ports 80 and 443, which most office and school networks leave open. Browsers need the login to use the relay, so anyone who opens the game can read it: set a usage limit in your Metered dashboard.
+To give private rooms your own relay, set this before the game script. With a [Metered](https://www.metered.ca/) account only the login is needed; it also works over ports 80 and 443, which most office and school networks leave open. Public rooms skip it so strangers don't use up its allowance. Browsers need the login to use the relay, so anyone who opens the page can read it: set a usage limit with your provider.
 
-To add any other relay (TURN server), set this before the game script. It's tried first:
+```html
+<script>window.NUMBSKULL_RELAY = { username: 'your-metered-username', credential: 'your-metered-credential' };</script>
+```
+
+To add a relay (TURN server) for every room, public ones included, set this before the game script. It's tried first:
 
 ```html
 <script>window.NUMBSKULL_ICE = [{ urls: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' }];</script>

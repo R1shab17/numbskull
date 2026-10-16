@@ -4,7 +4,7 @@ import { Game, NET } from './game.js';
 import { MAX_PLAYERS, NET_VERSION, PUBLIC } from './config.js';
 import { PUBLIC_PREFIX } from './net.js';
 import { MAPS } from './maps.js';
-import { builtInMaps } from './packs.js';
+import { builtInMaps, sealedKeyFor, openWithKey, packImagesReady } from './packs.js';
 
 // Spectators don't take a player slot, but a room can't hold unlimited connections.
 export const MAX_WATCHERS = 12;
@@ -84,7 +84,7 @@ export class HostSession {
 
   broadcastLobby() {
     if (!this.net) return;
-    const msg = { t: 'lobby', code: this.code, players: this.lobby.map(lobbyView), settings: this.app.match };
+    const msg = { t: 'lobby', code: this.code, players: this.lobby.map(lobbyView), settings: this.app.match, pk: this.public ? null : sealedKeyFor(this.app.match.mapId) };
     this.net.broadcast(msg);
     if (this.app.ui.cur === 'lobby' && !this.inGame) this.app.ui.go('lobby', { host: true, code: this.code, you: 1, players: msg.players, settings: this.app.match });
   }
@@ -153,8 +153,40 @@ export class HostSession {
     game.balanceTeams();
     this.inGame = true;
     app.beginMatch(game);
-    const state = game.fullState();
-    for (const lp of this.lobby) if (lp.conn) this.net.send(lp.conn, { t: 'start', state, you: lp.id, watch: !!lp.watch });
+    this.known = new Map();
+    const full = game.fullState(), hidden = game.hiddenState();
+    for (const lp of this.lobby) if (lp.conn) this.sendStart(lp.conn, lp.id, !!lp.watch, { full, hidden });
+  }
+
+  // Players are only ever sent the forehead numbers they could see from where they stand
+  // (plus their own and their team's). Spectators see everyone's, like the god view shows.
+  sendStart(conn, id, watch, states) {
+    const game = this.app.game;
+    const st = states || {};
+    const state = watch ? (st.full || game.fullState()) : (st.hidden || game.hiddenState());
+    this.net.send(conn, { t: 'start', state, you: id, watch: !!watch, pk: this.public ? null : sealedKeyFor(game.mapId) });
+    (this.known || (this.known = new Map())).set(id, new Map());
+    this.revealNow = true;
+  }
+
+  reveal() {
+    const game = this.app.game;
+    if (!game || !this.known) return;
+    for (const lp of this.lobby) {
+      if (!lp.conn || !lp.conn.open) continue;
+      const me = game.players.get(lp.id);
+      const all = lp.watch || !me || (game.br && me.out);
+      let known = this.known.get(lp.id);
+      if (!known) this.known.set(lp.id, known = new Map());
+      let out = null;
+      for (const p of game.players.values()) {
+        if (!p.num || known.get(p.id) === p.num) continue;
+        if (!(all || p.id === lp.id || (game.teams && me && p.team === me.team) || game.noteMayShow(me, p))) continue;
+        known.set(p.id, p.num);
+        (out || (out = [])).push([p.id, p.num]);
+      }
+      if (out) this.net.send(lp.conn, { t: 'nums', n: out });
+    }
   }
 
   restart() { this.startMatch(); }
@@ -184,7 +216,7 @@ export class HostSession {
         this.byConn.set(conn, old.id);
         if (this.inGame && game) {
           if (!old.watch && !game.players.has(old.id)) { const p = game.addPlayer({ id: old.id, ...this.profileInfo(old), remote: true }); game.emit({ k: 'join', p: game.playerInit(p) }); }
-          this.net.send(conn, { t: 'start', state: game.fullState(), you: old.id, watch: !!old.watch });
+          this.sendStart(conn, old.id, !!old.watch);
         } else this.broadcastLobby();
         return;
       }
@@ -204,7 +236,7 @@ export class HostSession {
       this.byConn.set(conn, id);
       if (this.inGame && game && watch) {
         // watch the running match
-        this.net.send(conn, { t: 'start', state: game.fullState(), you: id, watch: true });
+        this.sendStart(conn, id, true);
         this.syncWatchers();
       } else if (this.inGame && game) {
         // drop into the running match, replacing a bot if we're full
@@ -214,7 +246,7 @@ export class HostSession {
         }
         const p = game.addPlayer({ id, ...info, remote: true });
         game.emit({ k: 'join', p: game.playerInit(p) });
-        this.net.send(conn, { t: 'start', state: game.fullState(), you: id });
+        this.sendStart(conn, id, false);
       } else this.broadcastLobby();
       return;
     }
@@ -307,9 +339,13 @@ export class HostSession {
     }
     if (!game || !this.net || !this.inGame) return;
     if (game.outEvents.length) {
-      this.net.broadcast({ t: 'ev', e: game.outEvents });
+      this.net.broadcast({ t: 'ev', e: game.outEvents.map(Game.publicEvent) });
+      if (game.outEvents.some(e => e.k === 'spawn' || e.k === 'peel' || e.k === 'join' || e.k === 'jumped')) this.revealNow = true;
       game.outEvents = [];
     }
+    // tell each player the numbers that have just come into their view
+    this.revealT = (this.revealT || 0) - dt;
+    if (this.revealT <= 0 || this.revealNow) { this.revealT = 0.1; this.revealNow = false; this.reveal(); }
     this.snapT -= dt;
     if (this.snapT <= 0) { this.snapT = SNAP_RATE; this.net.broadcast(game.snapshot()); }
   }
@@ -391,6 +427,8 @@ export class ClientSession {
   onData(m) {
     if (!m || typeof m !== 'object') return;
     this.seen = performance.now();
+    // a sealed map is being opened for this match: keep everything that arrives meanwhile
+    if (this.held) { this.held.push(m); return; }
     const app = this.app;
     if (m instanceof ArrayBuffer) { if (app.game && this.inGame) app.game.applySnapshot(m); return; }
     switch (m.t) {
@@ -403,6 +441,8 @@ export class ClientSession {
       case 'lobby':
         this.lobbyData = m;
         this.rejoins = 0;
+        // the host is on a sealed map: open it with the key they sent, then redraw the lobby
+        if (m.pk && m.settings && !MAPS[m.settings.mapId]) openWithKey(m.pk).then((ok) => { if (ok && this.lobbyData === m && !this.inGame && !this.closed) app.ui.go('lobby', { host: false, code: this.code, you: this.id, players: m.players, settings: m.settings }); });
         if (!this.inGame) app.ui.go('lobby', { host: false, code: this.code, you: this.id, players: m.players, settings: m.settings });
         break;
       case 'tolobby':
@@ -411,6 +451,16 @@ export class ClientSession {
         app.ui.go('lobby', { host: false, code: this.code, you: this.id, players: this.lobbyData?.players || [], settings: this.lobbyData?.settings || app.match });
         break;
       case 'start': {
+        if (m.pk && m.state && !MAPS[m.state.opts.mapId] && !m.opened) {
+          this.held = [];
+          openWithKey(m.pk).then((ok) => (ok ? packImagesReady() : null)).catch(() => {}).then(() => {
+            const held = this.held || [];
+            this.held = null;
+            this.onData({ ...m, opened: true });
+            for (const x of held) this.onData(x);
+          });
+          break;
+        }
         this.id = m.you;
         this.rejoins = 0;
         const s = m.state;
@@ -430,6 +480,9 @@ export class ClientSession {
         app.beginMatch(game);
         break;
       }
+      case 'nums':
+        if (app.game && this.inGame && Array.isArray(m.n)) for (const [id, num] of m.n) { const p = app.game.players.get(id); if (p && typeof num === 'string') { p.num = num; app.numberRevealed(id, num); } }
+        break;
       case 'nojump': app.ui.toast('No room to jump in right now.'); break;
       case 'ev':
         if (app.game && this.inGame) for (const e of m.e) {

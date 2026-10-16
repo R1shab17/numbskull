@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { MODES, DIFFICULTY, SHIRT_COLORS, SKIN_TONES, HATS, HAT_LABEL, TEAM_NAME, MAX_PLAYERS, VERSION, GADGET_LABEL } from './config.js';
 import { MAP_LIST } from './maps.js';
-import { pickableMaps, secretWords, unlockPack } from './packs.js';
+import { pickableMaps, unlockPack, tryWord, hasSecrets } from './packs.js';
 import { Avatar } from './avatar.js';
 import { audio } from './audio.js';
 import { esc } from './hud.js';
@@ -53,15 +53,28 @@ export class UI {
     this.listenForSecrets();
   }
 
-  // Secret maps: type the pack's word on the home screen (or tap the title 7 times on a phone).
+  // Secret maps: type the pack's word on the home screen. On a phone, tapping the title 7 times
+  // opens a box to type it into. (The word itself is never in the page; see packs.js.)
   listenForSecrets() {
-    let typed = '';
+    let typed = '', busy = false, again = false;
+    const check = async () => {
+      if (busy) { again = true; return; }
+      busy = true;
+      try {
+        do {
+          again = false;
+          const found = await tryWord(typed);
+          if (found.length) { typed = ''; this.unlock(found); }
+        } while (again);
+      } catch { /* no WebCrypto here */ }
+      busy = false;
+    };
     addEventListener('keydown', (e) => {
       if (this.cur !== 'home' || this.menu.hidden || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
-      if (!/^[a-z0-9]$/i.test(e.key)) return;
+      if (!/^[a-z0-9]$/i.test(e.key) || !hasSecrets()) return;
       typed = (typed + e.key.toLowerCase()).slice(-32);
-      for (const s of secretWords()) if (typed.endsWith(s.word)) { typed = ''; this.unlock([s.pack]); }
+      check();
     });
     let taps = 0, tapT = 0;
     this.root.addEventListener('click', (e) => {
@@ -69,7 +82,11 @@ export class UI {
       const now = performance.now();
       taps = now - tapT < 1500 ? taps + 1 : 1;
       tapT = now;
-      if (taps >= 7) { taps = 0; const packs = secretWords().map(s => s.pack); if (packs.length) this.unlock(packs); }
+      if (taps >= 7 && hasSecrets()) {
+        taps = 0;
+        const f = $('#secretBox');
+        if (f) { f.hidden = false; f.querySelector('input').focus(); }
+      }
     });
   }
 
@@ -115,6 +132,7 @@ export class UI {
     return `<section class="screen home">
       <div>
         <div class="logo"><h1>NUMB<br>SKULL</h1><span class="num">4821</span></div>
+        <form class="secretbox" id="secretBox" hidden><input id="secretWord" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Secret word" aria-label="Secret word"></form>
         <p class="tagline">Read their forehead. Type the number. They're out.</p>
         <div class="home-actions">
           <button class="btn big go" id="hQuick">Play online <span class="kbd" style="color:inherit">Battle Royale</span></button>
@@ -158,6 +176,15 @@ export class UI {
     const hat = (d) => { const i = (HATS.indexOf(P.hat) + d + HATS.length) % HATS.length; P.hat = HATS[i]; $('#hatName').textContent = HAT_LABEL[P.hat]; save(); };
     $('#hatPrev').addEventListener('click', () => hat(-1));
     $('#hatNext').addEventListener('click', () => hat(1));
+    $('#secretBox').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const box = $('#secretWord'), word = box.value.trim().toLowerCase();
+      if (!word) return;
+      let found = [];
+      try { found = await tryWord(word); } catch { /* no WebCrypto here */ }
+      if (found.length) { box.value = ''; $('#secretBox').hidden = true; this.unlock(found); }
+      else { box.select(); this.toast("That word doesn't unlock anything."); }
+    });
     $('#hPlay').addEventListener('click', () => this.go('setup', { kind: 'solo' }));
     $('#hQuick').addEventListener('click', () => this.app.quickPlay());
     $('#hHost').addEventListener('click', () => this.go('setup', { kind: 'host' }));

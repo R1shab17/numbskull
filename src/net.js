@@ -3,7 +3,7 @@
 import { Peer } from 'peerjs';
 
 const PREFIX = 'numbskull-room-v3-';
-export const PUBLIC_PREFIX = 'numbskull-pub-v3-';
+export const PUBLIC_PREFIX = 'numbskull-pub-v4-';  // bumped with NET_VERSION so public rooms never mix versions
 
 // Messages travel raw: binary snapshots as ArrayBuffers, everything else as JSON text.
 // JSON is encoded once per broadcast instead of once per player.
@@ -13,16 +13,24 @@ const LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 
 // How browsers find a route to each other. Most pairs connect directly (STUN tells each
 // browser its public address). When a network blocks that, traffic goes through a relay
-// (TURN). In private rooms, Numbskull's own relay (a Metered account) is tried first once its
-// login is filled in: it also answers on ports 80 and 443, which strict office and school
-// networks usually leave open. Its monthly allowance is small, so public rooms don't use it.
-// Browsers need the login to use it, so anyone can read it from the page. Two
-// free public relays back it up: PeerJS's own, and Metered's Open Relay Project, whose shared
-// secret is published for public use and turned into short-lived credentials below. A page
-// can add its own relay first with window.NUMBSKULL_ICE = [{ urls, username, credential }, ...].
-const RELAY_HOST = 'global.relay.metered.ca';
-const RELAY_LOGIN = { username: '7d4bb7f6fd51134a0b4d1f39', credential: 'G8NjUmVU1s5RvNlM' };
-const RELAY = RELAY_LOGIN.username ? [{ urls: [`turn:${RELAY_HOST}:80`, `turn:${RELAY_HOST}:80?transport=tcp`, `turn:${RELAY_HOST}:443`, `turns:${RELAY_HOST}:443?transport=tcp`], ...RELAY_LOGIN }] : [];
+// (TURN). A page can give private rooms a relay of its own to try first, which is how a
+// Metered account is used (it also answers on ports 80 and 443, which strict office and school
+// networks usually leave open):
+//   window.NUMBSKULL_RELAY = { username, credential }            (Metered's global relay)
+//   window.NUMBSKULL_RELAY = { urls: [...], username, credential } (any other TURN server)
+// Public rooms skip it so strangers don't use up its allowance. Browsers need the login to use
+// a relay, so anyone can read it from the page: set a usage limit with the provider. Two free
+// public relays back it up: PeerJS's own, and Metered's Open Relay Project, whose shared secret
+// is published for public use and turned into short-lived credentials below. A page can also
+// add relays for every room with window.NUMBSKULL_ICE = [{ urls, username, credential }, ...].
+const METERED = 'global.relay.metered.ca';
+function ownRelay() {
+  let r = null;
+  try { r = globalThis.NUMBSKULL_RELAY; } catch { /* ignore */ }
+  if (!r || !r.username || !r.credential) return [];
+  const urls = r.urls || [`turn:${METERED}:80`, `turn:${METERED}:80?transport=tcp`, `turn:${METERED}:443`, `turns:${METERED}:443?transport=tcp`];
+  return [{ urls, username: String(r.username), credential: String(r.credential) }];
+}
 const PEERJS_TURN = { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' };
 const STUN = { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] };
 let openRelay = null;
@@ -40,7 +48,7 @@ try { if (globalThis.crypto && crypto.subtle) makeOpenRelay().then((r) => { open
 function iceServers(own) {
   let extra = [];
   try { if (Array.isArray(window.NUMBSKULL_ICE)) extra = window.NUMBSKULL_ICE.filter(x => x && x.urls); } catch { /* ignore */ }
-  return [...extra, STUN, ...(own ? RELAY : []), PEERJS_TURN, ...(openRelay ? [openRelay] : [])];
+  return [...extra, STUN, ...(own ? ownRelay() : []), PEERJS_TURN, ...(openRelay ? [openRelay] : [])];
 }
 
 // Optional self-hosted signalling server: ?signal=https://your-peer-server.example/path

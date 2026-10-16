@@ -284,6 +284,36 @@ export class Game {
 
   isEnemy(a, b) { return a.id !== b.id && (!this.teams || a.team !== b.team); }
 
+  // Could viewer `s` be looking at t's note right now, or within the next moment? The host uses
+  // this to decide whose numbers each player's browser is told, so it errs on the generous side
+  // (wider than the screen, a little round the side of the head) and a note never shows up blank.
+  noteMayShow(s, t) {
+    if (!t.alive || !s) return false;
+    let ex, ey, ez, yaw, zoom = s.zoom, far = 0;
+    if (s.alive) { [ex, ey, ez] = this.eye(s); yaw = s.yaw; }
+    else if (s.deathPos) {
+      // the death camera hangs over where you went down, looking at whoever read you
+      [ex, ey, ez] = s.deathPos; ey += 3.2;
+      const k = this.players.get(s.killedBy);
+      yaw = k && k.alive ? Math.atan2(-(k.x - ex), -(k.z - ez)) : s.yaw;
+      zoom = false; if (k && k.id === t.id) far = 80;
+    } else return false;
+    // back of the head: the note can't be seen
+    const fx = ex - t.x, fz = ez - t.z, fl = Math.hypot(fx, fz) || 1;
+    if ((-Math.sin(t.yaw) * fx - Math.cos(t.yaw) * fz) / fl < -0.3) return false;
+    const [hx, hy, hz] = this.forehead(t);
+    const dx = hx - ex, dy = hy - ey, dz = hz - ez;
+    const d = Math.hypot(dx, dy, dz);
+    // angle between where they're looking and the note, ignoring pitch
+    const lx = dx * Math.cos(yaw) - dz * Math.sin(yaw), lf = -dx * Math.sin(yaw) - dz * Math.cos(yaw);
+    const ang = Math.atan2(Math.abs(lx), lf);
+    const half = (fov) => Math.atan(Math.tan((fov * Math.PI / 180) / 2) * (s.aspect || 1.7));
+    const near = d < 4 || (d <= CFG.killRange + 16 + far && ang <= half(s.fov || CFG.fov) + 0.6);
+    const zoomed = zoom && d <= CFG.binoRange + 15 && ang <= half(CFG.binoFov) + 0.25;
+    if (!near && !zoomed) return false;
+    return !this.world.segmentBlocked(ex, ey, ez, hx, hy, hz, false);
+  }
+
   // ---------------------------------------------------------------- events
   emit(ev) {
     this.applyEvent(ev);
@@ -744,9 +774,24 @@ export class Game {
     };
   }
 
+  // The same, with nobody's forehead number in it (the host fills those in per player).
+  hiddenState() {
+    const s = this.fullState();
+    s.players = s.players.map(pi => ({ ...pi, state: { ...pi.state, num: '' } }));
+    return s;
+  }
+
   playerInit(p) {
     return { id: p.id, name: p.name, isBot: p.isBot, team: p.team, shirt: p.shirt, skin: p.skin, hat: p.hat,
       state: { x: p.x, y: p.y, z: p.z, yaw: p.yaw, alive: p.alive, num: p.num, kills: p.kills, deaths: p.deaths, caps: p.caps, misses: p.misses, carrying: p.carrying, protect: p.protect, respawnT: p.respawnT, inv: { ...p.inv }, tx: p.x, ty: p.y, tz: p.z, tyaw: p.yaw, hasT: true, streak: p.streak, bestStreak: p.bestStreak, out: !!p.out, spawned: !!p.spawned, place: p.place || 0, notes: p.notes || 1 } };
+  }
+
+  // An event as sent to everyone: new forehead numbers and typed guesses are left out.
+  static publicEvent(ev) {
+    if ((ev.k === 'spawn' || ev.k === 'peel') && ev.num) return { ...ev, num: '' };
+    if (ev.k === 'miss' && ev.code) { const { code, ...rest } = ev; return rest; }
+    if (ev.k === 'join' && ev.p && ev.p.state && ev.p.state.num) return { ...ev, p: { ...ev.p, state: { ...ev.p.state, num: '' } } };
+    return ev;
   }
 
   loadState(s) {

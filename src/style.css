@@ -81,6 +81,8 @@ button { cursor: pointer; }
 @media (max-width: 480px) { .profile { grid-template-columns: 1fr; } .profile canvas { justify-self: center; } }
 .profile canvas { width: 150px; height: 190px; border-radius: 8px; background: rgba(23,20,31,.08); }
 .field { display: grid; gap: 6px; margin-bottom: 12px; min-width: 0; }
+.secretbox { margin: 10px 0 0; max-width: 240px; }
+.secretbox input { width: 100%; font: inherit; font-weight: 700; padding: 8px 12px; border: 2px solid var(--ink); border-radius: 10px; background: #fff; color: var(--ink); }
 .field input[type=text], .field input:not([type]), .codein {
   width: 100%; background: var(--white); color: var(--ink); border: 3px solid var(--ink); border-radius: 8px; padding: .55em .7em; font-weight: 700;
 }
